@@ -1,0 +1,20 @@
+[Unit]
+Description=Hermes Phonebot Gateway for FreePBX
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/phonebot/phonebot.env
+WorkingDirectory=%h/.hermes/profiles/phonebot
+ExecStart=%h/.hermes/hermes-agent/venv/bin/hermes --profile phonebot gateway run
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.hermes/profiles/phonebot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

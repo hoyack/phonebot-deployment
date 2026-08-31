@@ -1,0 +1,94 @@
+"""Client for a Hermes profile's api_server.
+
+Shapes verified against gateway/platforms/api_server.py in the local Hermes
+install: POST /api/sessions creates a session (409 when it already exists),
+POST /api/sessions/{id}/chat runs one synchronous agent turn and returns the
+reply at message.content. Auth is a bearer token (API_SERVER_KEY).
+"""
+from __future__ import annotations
+
+import json
+from typing import AsyncIterator
+
+import httpx
+
+
+class HermesError(RuntimeError):
+    """Hermes returned an error or an unusable response."""
+
+
+class HermesClient:
+    # 30s, not the 60s this shipped with. Measured Hermes generation is 2-11s,
+    # so anything beyond ~30s is a stall, not a slow answer -- and the caller
+    # is sitting on an open line hearing nothing while we wait. A live call
+    # proved the cost: one /chat never answered, httpx raised ReadTimeout 64s
+    # later, and the caller heard 64s of silence before the call died.
+    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+
+    async def create_session(self, session_id: str, system_prompt: str | None = None) -> str:
+        body: dict[str, object] = {"id": session_id}
+        if system_prompt:
+            body["system_prompt"] = system_prompt
+        resp = await self._client.post("/api/sessions", json=body)
+        if resp.status_code == 409:
+            return session_id  # already exists; reuse it
+        if resp.status_code >= 400:
+            raise HermesError(f"create_session failed: HTTP {resp.status_code}")
+        return (resp.json().get("session") or {}).get("id") or session_id
+
+    async def chat(self, session_id: str, message: str) -> str:
+        resp = await self._client.post(
+            f"/api/sessions/{session_id}/chat", json={"message": message}
+        )
+        if resp.status_code >= 400:
+            raise HermesError(f"chat failed: HTTP {resp.status_code}")
+        return ((resp.json().get("message") or {}).get("content")) or ""
+
+    async def chat_stream(self, session_id: str, message: str) -> AsyncIterator[str]:
+        """Yield reply text deltas from the SSE stream.
+
+        Only assistant.delta carries reply text. tool.progress also has a
+        'delta' field (tool_name '_thinking'), so events must be filtered by
+        NAME -- keying off the presence of 'delta' would speak the model's
+        internal reasoning down the phone.
+        """
+        async with self._client.stream(
+            "POST", f"/api/sessions/{session_id}/chat/stream",
+            json={"message": message},
+        ) as resp:
+            if resp.status_code >= 400:
+                raise HermesError(f"chat_stream failed: HTTP {resp.status_code}")
+            event = None
+            async for line in resp.aiter_lines():
+                if line.startswith("event:"):
+                    event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:") and event == "assistant.delta":
+                    try:
+                        payload = json.loads(line.split(":", 1)[1].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    delta = payload.get("delta")
+                    if delta:
+                        yield delta
+
+    async def append_assistant(self, session_id: str, text: str) -> None:
+        """Record what the caller actually heard after an interruption."""
+        resp = await self._client.post(
+            f"/api/sessions/{session_id}/chat",
+            json={"message": f"[system] Your previous reply was interrupted. "
+                             f"The caller only heard: {text}"},
+        )
+        if resp.status_code >= 400:
+            raise HermesError(f"append_assistant failed: HTTP {resp.status_code}")
+
+    async def aclose(self) -> None:
+        await self._client.aclose()

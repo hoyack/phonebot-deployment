@@ -1,0 +1,97 @@
+ari:
+  base_url: http://127.0.0.1:8088/ari
+  app: phonesys
+
+extensions:
+  "7000":
+    mode: turn
+    profile: phonebot
+    hermes_base_url: http://127.0.0.1:8642
+    hermes_api_key_env: HERMES_PHONEBOT_API_KEY
+    greeting: "Hi, this is Hermes. What can I do for you?"
+    # Sarah - mature, reassuring, confident. Chosen for intelligibility at
+    # 8 kHz telephony bandwidth, where thinner voices lose clarity.
+    voice_id: EXAVITQu4vr4xnSDxMaL
+    # Fixed dead air on every turn: Asterisk waits this long after you stop
+    # speaking before it ends the recording. 1s roughly halves the perceived
+    # pause; raise it back to 2 if callers who pause mid-sentence get clipped.
+    max_silence_seconds: 1
+    max_turn_seconds: 30
+    max_call_seconds: 600
+  "7001":
+    mode: streaming
+    profile: phonebot
+    full_name: Mary Yoder
+    receptionist: true
+    hermes_base_url: http://127.0.0.1:8642
+    hermes_api_key_env: HERMES_PHONEBOT_API_KEY
+    greeting: "Mary speaking, how may I help you?"
+    # Let the PSTN/RTP media path settle before the first syllable.  Telnyx
+    # calls occasionally clipped "Mary" with the former 250ms delay.
+    greeting_delay_ms: 750
+    voice_id: EXAVITQu4vr4xnSDxMaL
+    # How long an interim (non-final) transcript must keep arriving before
+    # it counts as the caller interrupting, rather than a stray cough or
+    # "mm" -- see StreamingCallHandler's confirm_frames.
+    barge_in_confirm_ms: 300
+    # 9000 is taken by an unrelated minio container on this host; Asterisk
+    # reaches the bridge container over the Docker bridge network by this
+    # hostname, not localhost.
+    audiosocket_host: host.docker.internal
+    audiosocket_port: 9010
+    max_silence_seconds: 1
+    max_turn_seconds: 30
+    max_call_seconds: 600
+    # End the call after this many seconds of caller silence while the bridge
+    # is LISTENING (never while the agent is speaking, filler is playing, or
+    # Hermes is generating). Without it the only limit was max_call_seconds:
+    # a caller who was just told "goodbye" and said nothing held the line for
+    # the full ten minutes and had to hang up by hand.
+    #
+    # Not set on 7000, and must not be: that extension already ends calls on
+    # its own silence budget (call.py's SILENT_TURNS_BEFORE_PROMPT), and a
+    # second mechanism would fight it.
+    idle_hangup_seconds: 10
+    # Stall phrases covering the 4-10s Hermes takes to answer. Escalating
+    # tiers: the first is spoken after filler_delay_ms, the next one
+    # filler_repeat_ms later, holding at the last tier.
+    #
+    # These are chosen before Hermes has produced a single token, so a phrase
+    # must NOT assert anything about what the caller just said. "Good question"
+    # was here and had to go: it classifies the utterance as a question, and
+    # answered a plain statement with a non-sequitur. Acknowledge receipt,
+    # never evaluate the input.
+    #
+    # Edit freely, but note each phrase costs one ElevenLabs call at startup,
+    # and the ARI event loop -- and therefore extension 7000 -- does not accept
+    # calls until they all finish. Seven phrases plus the greeting is ~1.6s.
+    filler_delay_ms: 800
+    filler_repeat_ms: 3000
+    filler_phrases:
+      - ["Let me think about that.", "Give me a second.", "One moment."]
+      - ["Still working on that.", "Bear with me."]
+      - ["Almost there.", "Nearly done."]
+  "7002":
+    mode: streaming
+    profile: jyoder
+    full_name: John Yoder
+    directory_listing: true
+    access_pin_env: JOHN_YODER_PIN
+    hermes_base_url: http://127.0.0.1:8643
+    hermes_api_key_env: HERMES_PHONEBOT_API_KEY
+    greeting: "John Yoder speaking, how can I help you today?"
+    greeting_delay_ms: 250
+    voice_id: pqHfZKP75CvOlQylNhV4
+    barge_in_confirm_ms: 300
+    audiosocket_host: host.docker.internal
+    audiosocket_port: 9010
+    max_silence_seconds: 1
+    max_turn_seconds: 30
+    max_call_seconds: 600
+    idle_hangup_seconds: 10
+    filler_delay_ms: 800
+    filler_repeat_ms: 3000
+    filler_phrases:
+      - ["Let me look into that.", "Give me a moment to check.", "Let me think that through.", "I'll take a quick look.", "One moment while I work on that."]
+      - ["I'm still working on it.", "This is taking a little longer than expected.", "Bear with me for another moment."]
+      - ["I should have that shortly.", "I'm nearly there.", "Just a little longer."]
