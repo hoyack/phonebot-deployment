@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import logging
 import random
+import secrets
 import uuid as uuid_mod
 from typing import Callable, Sequence
 
@@ -78,6 +79,16 @@ STT_FAILURE_MESSAGE = (
 HERMES_FAILURE_MESSAGE = (
     "Sorry, I lost my train of thought there. Could you say that again?"
 )
+
+
+HERMES_TIMEOUT_MESSAGE = (
+    "Sorry, this is taking too long. I don't have a complete answer yet. "
+    "Would you like to ask something else?"
+)
+
+
+class _ReplyTimeout(Exception):
+    """The reply's wall-clock generation budget expired."""
 
 
 class SpeechBurst:
@@ -288,6 +299,64 @@ class StreamingCallHandler:
         """
         self._greeting_frames = frames
 
+    async def _authenticate_pin(
+        self,
+        audio: AudioSocketSession,
+        speaking_ext: ExtensionConfig,
+        target_ext: ExtensionConfig,
+        channel_id: str,
+    ) -> bool:
+        """Authenticate a protected extension before Hermes sees the call.
+
+        `speaking_ext` supplies the voice used for the prompt.  During a Mary
+        transfer that keeps the receptionist speaking until authentication
+        succeeds; on a direct call it is the protected extension itself.
+        PIN digits are deliberately never logged.
+        """
+        if not target_ext.access_pin:
+            return True
+        if self._dtmf is None:
+            logger.error(
+                "call %s: PIN-protected extension %s has no DTMF collector",
+                channel_id,
+                target_ext.profile,
+            )
+            return False
+
+        digit_count = len(target_ext.access_pin)
+        for attempt in range(3):
+            # Arm collection before speaking so callers may begin typing
+            # during the prompt without losing the first digit.
+            pin_task = asyncio.create_task(
+                self._dtmf.collect(channel_id, digit_count, timeout=15.0)
+            )
+            try:
+                await asyncio.sleep(0)
+                prompt = (
+                    f"Please enter your {digit_count}-digit PIN using the "
+                    "telephone keypad."
+                    if attempt == 0 else
+                    "That PIN was not correct. Please try again."
+                )
+                await self._speak(audio, speaking_ext, [prompt])
+                entered = await pin_task
+            finally:
+                if not pin_task.done():
+                    pin_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pin_task
+            if entered is not None and secrets.compare_digest(
+                entered, target_ext.access_pin
+            ):
+                return True
+
+        logger.info(
+            "call %s: PIN authentication failed for profile %s",
+            channel_id,
+            target_ext.profile,
+        )
+        return False
+
     async def handle(self, channel_id: str, extension: str,
                      ext: ExtensionConfig) -> None:
         hermes = self._hermes_factory(ext)
@@ -321,7 +390,6 @@ class StreamingCallHandler:
         logger.info("streaming call %s on extension %s", channel_id, extension)
         try:
             await self._ari.answer(channel_id)
-            await hermes.create_session(session_id)
 
             bridge_id = await self._ari.create_bridge()
             await self._ari.add_to_bridge(bridge_id, channel_id)
@@ -333,14 +401,27 @@ class StreamingCallHandler:
                 call_uuid, timeout=AUDIOSOCKET_WAIT_TIMEOUT
             )
 
-            await stt.connect()
-
             # RTP and AudioSocket are established before this point, but the
             # first outbound frames can still race the media path on a newly
             # answered PSTN call. Extensions may opt into a short settle
             # window so the first syllable of the greeting is not clipped.
             if ext.greeting_delay_ms:
                 await asyncio.sleep(ext.greeting_delay_ms / 1000.0)
+
+            # Authentication is deliberately before both the Hermes session
+            # and STT connection.  A protected agent must receive no speech,
+            # session context, or transcript until the PIN succeeds, whether
+            # reached through Mary or dialled directly.
+            if not await self._authenticate_pin(audio, ext, ext, channel_id):
+                await self._speak(
+                    audio,
+                    ext,
+                    ["I'm sorry, I couldn't verify that PIN. Goodbye."],
+                )
+                return
+
+            await hermes.create_session(session_id)
+            await stt.connect()
 
             async def pump_audio() -> None:
                 """Forward every inbound frame to STT, in every state.
@@ -556,51 +637,15 @@ class StreamingCallHandler:
                                 if len(resolution.matches) == 1:
                                     person = resolution.matches[0]
                                     target = self._extensions[person.extension]
-                                    if target.access_pin:
-                                        if self._dtmf is None:
-                                            logger.error(
-                                                "call %s: PIN-protected transfer has no DTMF collector",
-                                                channel_id,
-                                            )
-                                            await self._speak(
-                                                audio, ext,
-                                                ["I'm sorry, that person is not available right now."],
-                                            )
-                                            idle_since = loop.time()
-                                            continue
-                                        authenticated = False
-                                        for attempt in range(3):
-                                            # Arm collection before speaking so a caller who
-                                            # starts typing during the prompt does not lose the
-                                            # first digits. The timeout includes the prompt.
-                                            pin_task = asyncio.create_task(
-                                                self._dtmf.collect(
-                                                    channel_id, len(target.access_pin),
-                                                    timeout=15.0,
-                                                )
-                                            )
-                                            await asyncio.sleep(0)
-                                            prompt = (
-                                                "Please enter your six digit PIN using the telephone keypad."
-                                                if attempt == 0 else
-                                                "That PIN was not correct. Please try again."
-                                            )
-                                            await self._speak(audio, ext, [prompt])
-                                            entered = await pin_task
-                                            if entered == target.access_pin:
-                                                authenticated = True
-                                                break
-                                        if not authenticated:
-                                            logger.info(
-                                                "call %s: PIN authentication failed for %s",
-                                                channel_id, person.extension,
-                                            )
-                                            await self._speak(
-                                                audio, ext,
-                                                ["I'm sorry, I couldn't verify that PIN. How else may I help you?"],
-                                            )
-                                            idle_since = loop.time()
-                                            continue
+                                    if not await self._authenticate_pin(
+                                        audio, ext, target, channel_id
+                                    ):
+                                        await self._speak(
+                                            audio, ext,
+                                            ["I'm sorry, I couldn't verify that PIN. How else may I help you?"],
+                                        )
+                                        idle_since = loop.time()
+                                        continue
                                     logger.info(
                                         "call %s transferring from %s to %s (%s)",
                                         channel_id, ext.full_name, person.full_name,
@@ -815,6 +860,10 @@ class StreamingCallHandler:
         buf = SentenceBuffer()
         tracker = HeardTracker()
         loop = asyncio.get_running_loop()
+        # One absolute cutoff, not refreshed by text, tool events or keepalives.
+        # Playback already in progress may finish; the next delta wait observes
+        # this cutoff. max_call_seconds still bounds sentence playback itself.
+        reply_deadline = loop.time() + ext.hermes_reply_timeout_seconds
         spoken: list[str] = []
         index = 0
 
@@ -840,8 +889,8 @@ class StreamingCallHandler:
 
         # The startup-prepared bank belongs to the first streaming profile's
         # voice. Never play Mary's cached filler after a transfer to John.
-        # Other profiles synthesize one short, correctly voiced filler on
-        # demand while Hermes generates in parallel.
+        # Other profiles synthesize correctly voiced filler on demand and
+        # cache each phrase for this turn while Hermes generates in parallel.
         bank = (self._filler_bank if self._filler_profile in (None, ext.profile)
                 else None)
         filler_stop = asyncio.Event()
@@ -879,30 +928,33 @@ class StreamingCallHandler:
                 await _wait_any((filler_stop, ended),
                                 timeout=ext.filler_delay_ms / 1000.0)
                 tier = 0
+                phrase_tiers = tuple(t for t in ext.filler_phrases if t)
+                phrase_cache: dict[str, Frames] = {}
                 while not filler_stop.is_set() and not ended.is_set():
                     if bank is not None and not bank.is_empty():
                         frames = bank.take(tier)
                         if frames is None:
                             return
                     else:
-                        if not ext.filler_phrases:
+                        if not phrase_tiers:
                             return
-                        # A transferred profile has no startup cache in the
-                        # legacy single-bank architecture. Pick across its
-                        # configured phrases so repeated turns do not always
-                        # say the first line, then synthesize with that
-                        # profile's own voice while Hermes generates.
-                        choices = [phrase for tier_phrases in ext.filler_phrases
-                                   for phrase in tier_phrases]
-                        frames = await self._tts.synthesize_frames(
-                            random.choice(choices), ext.voice_id, -1
-                        )
+                        phrase = random.choice(phrase_tiers[tier])
+                        if phrase not in phrase_cache:
+                            phrase_cache[phrase] = await self._tts.synthesize_frames(
+                                phrase, ext.voice_id, -1
+                            )
+                        frames = phrase_cache[phrase]
+                    # Synthesis can finish after a stop request. Never restart
+                    # the session-wide sender after filler was silenced.
+                    if filler_stop.is_set() or ended.is_set():
+                        return
                     await audio.send_frames(frames, on_sent=_on_filler_frame_sent)
                     if filler_stop.is_set() or ended.is_set():
                         return
-                    if bank is None or bank.is_empty():
-                        return
-                    tier = min(tier + 1, bank.last_tier)
+                    last_tier = (bank.last_tier
+                                 if bank is not None and not bank.is_empty()
+                                 else len(phrase_tiers) - 1)
+                    tier = min(tier + 1, last_tier)
                     await _wait_any((filler_stop, ended),
                                     timeout=ext.filler_repeat_ms / 1000.0)
             except asyncio.CancelledError:
@@ -1097,7 +1149,10 @@ class StreamingCallHandler:
                 hermes.chat_stream(session_id, utterance)
             ) as stream:
                 while True:
-                    delta = await _next_delta(stream, utterance_ready)
+                    delta = await _next_delta(
+                        stream, utterance_ready, ended=ended, deadline=deadline,
+                        reply_deadline=reply_deadline
+                    )
                     # t1: first return from _next_delta, whatever it is --
                     # including a None on a reply that streamed no content
                     # at all. This is a plain assignment in _reply's own
@@ -1116,6 +1171,19 @@ class StreamingCallHandler:
             tail = buf.flush()
             if tail:
                 await speak_sentence(tail)
+        except _ReplyTimeout:
+            logger.warning("Hermes reply budget expired; returning to listening")
+            # Do not POST a history correction: that starts another agent run
+            # immediately after cancelling this one. Log partial heard text only.
+            logger.info("reply timeout; caller heard: %r", tracker.heard_text(spoken))
+            await stop_filler()
+            if (not ended.is_set() and not utterance_ready.is_set()
+                    and loop.time() < deadline):
+                # The normal sender preserves one writer, frame draining,
+                # barge-in and the overall call deadline for this apology too.
+                with contextlib.suppress(_Interrupted, _CallEnded, _TimeLimit,
+                                         TtsStreamError, httpx.HTTPError):
+                    await speak_sentence(HERMES_TIMEOUT_MESSAGE)
         except _Interrupted:
             credit_heard("interrupted")
         except _TimeLimit:
@@ -1208,62 +1276,61 @@ def _delta_ms(later: float | None, earlier: float | None) -> int | None:
     return round((later - earlier) * 1000)
 
 
-async def _next_delta(stream, abandon: asyncio.Event) -> str | None:
-    """Next reply delta, None at end of stream, or raise _Interrupted.
+async def _next_delta(stream, abandon: asyncio.Event, *,
+                      ended: asyncio.Event, deadline: float,
+                      reply_deadline: float) -> str | None:
+    """Race every delta against call termination and a new utterance.
 
-    Without this race, _reply blocks in `async for delta in stream` and a
-    caller who asks something new during the 4-10s wait is not noticed until
-    a whole sentence has already been spoken at them.
-
-    `abandon` is deliberately utterance_ready and NOT interrupt: interrupt
-    fires on any confirmed interim burst, so line noise would discard a reply
-    the caller never heard a word of and leave them with no answer coming.
+    Drain anext before aclosing the stream, including on outer cancellation:
+    closing a still-running async generator raises instead of releasing HTTP.
     """
+    loop = asyncio.get_running_loop()
     nxt = asyncio.create_task(anext(stream))
     stop = asyncio.create_task(abandon.wait())
+    hung_up = asyncio.create_task(ended.wait())
+    tasks = {nxt, stop, hung_up}
     try:
         done, _ = await asyncio.wait(
-            {nxt, stop}, return_when=asyncio.FIRST_COMPLETED
+            tasks, timeout=max(0.0, min(deadline, reply_deadline) - loop.time()),
+            return_when=asyncio.FIRST_COMPLETED,
         )
-    finally:
-        stop.cancel()
-    # Prefer the delta when both are ready: a delta already in hand is not
-    # worth discarding, and the next call round will see `abandon` again.
-    if nxt in done:
-        try:
-            return nxt.result()
-        except StopAsyncIteration:
+        if ended.is_set():
+            raise _CallEnded
+        if loop.time() >= deadline:
+            raise _TimeLimit
+        # Playback may have crossed the generation cutoff after the final
+        # sentence. An already-finished stream is success, not an incomplete
+        # answer; never grant more waiting time to obtain that EOF, though.
+        if nxt in done and isinstance(nxt.exception(), StopAsyncIteration):
             return None
-    nxt.cancel()
-    # Cancelling nxt only SCHEDULES a CancelledError inside stream.__anext__;
-    # it is not delivered until the event loop next runs that task. Without
-    # draining it here, _reply's `async with contextlib.aclosing(stream)`
-    # calls stream.aclose() while the generator's prior __anext__ call is
-    # still marked as in flight, and CPython raises "aclose(): asynchronous
-    # generator is already running" instead of actually closing it.
-    #
-    # asyncio.wait({nxt}), not `await nxt` under suppress(CancelledError):
-    # wait() drains nxt without re-raising ITS OWN cancellation, but still
-    # lets a cancellation delivered to the ENCLOSING task propagate as
-    # CancelledError. Awaiting nxt directly under suppress(CancelledError)
-    # would swallow that outer cancellation too, turning it into a plain
-    # _Interrupted here and defeating an enclosing wait_for's timeout.
-    #
-    # Deliberately unbounded, unlike _drain_sender's SENDER_DRAIN_TIMEOUT:
-    # nxt is already cancelled, so this can only be waiting on the SSE
-    # generator itself to unwind at its current await point -- normally near
-    # instant. On the first delta of a reply, filler is still playing here
-    # (stop_filler() only runs once a real sentence is ready to speak), so
-    # the caller hears speech, not dead air, while this drains. On a LATER
-    # delta the previous sentence has already finished speaking and filler
-    # is long stopped, so this specific gap is a few ms of true silence --
-    # no worse than the silence between any two sentences of a normal reply.
-    # httpx's own client timeout (30s, HermesClient's default) is the outer
-    # bound either way. Adding a timeout here would NOT help: if it ever
-    # fired before nxt actually finished unwinding, aclose() would hit the
-    # exact "already running" RuntimeError this drain exists to prevent.
-    await asyncio.wait({nxt})
-    raise _Interrupted
+        if abandon.is_set() and loop.time() >= reply_deadline:
+            raise _Interrupted
+        if loop.time() >= reply_deadline:
+            raise _ReplyTimeout
+        # Preserve the existing delta preference on simultaneous barge-in.
+        if nxt in done:
+            try:
+                return nxt.result()
+            except StopAsyncIteration:
+                return None
+        raise _Interrupted
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        # Retrieve all results, including errors from a losing delta task.
+        # Shield the drain against repeated cancellation; propagate cancellation
+        # only after generator cleanup, never while aclose would still race it.
+        drain = asyncio.gather(*tasks, return_exceptions=True)
+        cancelled = False
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                cancelled = True
+        drain.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def _drain_sender(sender: asyncio.Task) -> None:

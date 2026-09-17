@@ -423,6 +423,38 @@ async def test_streaming_listener_binds_the_configured_port(monkeypatch):
     assert servers[0].started
 
 
+async def test_streaming_listener_can_differ_from_dial_target(monkeypatch):
+    """A host-side proxy may expose a different port than WSL binds."""
+    stream_ext = ExtensionConfig(
+        profile="phonebot", hermes_base_url="http://h", hermes_api_key="k",
+        greeting="hi", voice_id="v", max_silence_seconds=1,
+        max_turn_seconds=30, max_call_seconds=600, mode="streaming",
+        audiosocket_host="host.docker.internal", audiosocket_port=19010,
+        audiosocket_listen_port=9010,
+    )
+    cfg = Config(
+        ari=AriConfig(base_url="http://x", username="u", password="p", app="phonesys"),
+        extensions={"7000": TURN_EXT, "7001": stream_ext},
+    )
+    monkeypatch.setattr(main_mod, "load_config", lambda path: cfg)
+
+    servers: list[FakeAudioSocketServer] = []
+
+    def _make_server(host, port):
+        server = FakeAudioSocketServer(host, port)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(main_mod, "AudioSocketServer", _make_server)
+    monkeypatch.setattr(main_mod, "AriClient", lambda ari_cfg: FakeAriClient())
+
+    await main_mod.main()
+
+    assert len(servers) == 1
+    assert servers[0].port == 9010
+    assert stream_ext.audiosocket_port == 19010
+
+
 async def test_streaming_handler_gets_each_dependency_in_the_right_slot(monkeypatch):
     """Finding: swapping in RecordingHandler(*args) means reordering
     StreamingCallHandler's constructor arguments fails nothing -- the ARI

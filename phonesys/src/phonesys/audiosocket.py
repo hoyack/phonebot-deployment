@@ -192,6 +192,7 @@ class AudioSocketServer:
                 for frame_type, payload in decoder.feed(data):
                     if frame_type == TYPE_UUID:
                         call_uuid = str(uuid.UUID(bytes=payload))
+                        logger.info("audiosocket session established for %s", call_uuid)
                         session = AudioSocketSession(call_uuid, writer)
                         self._sessions[call_uuid] = session
                         waiter = self._waiters.get(call_uuid)

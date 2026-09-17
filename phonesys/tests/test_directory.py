@@ -4,6 +4,7 @@ from phonesys.directory import DirectoryPerson, resolve_transfer
 PEOPLE = (
     DirectoryPerson("7002", "John Yoder"),
     DirectoryPerson("7003", "John Smith"),
+    DirectoryPerson("7004", "Atlas Assistant"),
 )
 
 
@@ -30,3 +31,8 @@ def test_unknown_requested_name_has_no_matches():
     result = resolve_transfer("Connect me to Alice", PEOPLE)
     assert result.requested
     assert result.matches == ()
+
+
+def test_personal_assistant_resolves_to_atlas():
+    result = resolve_transfer("Transfer me to my personal assistant", PEOPLE)
+    assert [p.full_name for p in result.matches] == ["Atlas Assistant"]
