@@ -1,0 +1,24 @@
+; Merge into extensions_custom.conf; do not replace existing custom contexts.
+[from-internal-custom]
+include => phonesys-custom
+
+[phonesys-custom]
+exten => 7000,1,NoOp(PhoneSys turn-based phonebot)
+ same => n,Answer()
+ same => n,Stasis(phonesys,7000)
+ same => n,Hangup()
+
+exten => 7001,1,NoOp(PhoneSys Mary receptionist)
+ same => n,Answer()
+ same => n,Stasis(phonesys,7001)
+ same => n,Hangup()
+
+exten => 7002,1,NoOp(PhoneSys John PIN enforced by bridge)
+ same => n,Answer()
+ same => n,Stasis(phonesys,7002)
+ same => n,Hangup()
+
+exten => 7003,1,NoOp(PhoneSys Atlas private PIN enforced by bridge)
+ same => n,Answer()
+ same => n,Stasis(phonesys,7003)
+ same => n,Hangup()

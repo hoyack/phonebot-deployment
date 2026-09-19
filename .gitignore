@@ -15,4 +15,15 @@ phonebot/runtime/
 *.db-shm
 *.db-wal
 *.log
+**/auth.json
+**/sessions/
+**/logs/
+**/memories/
+**/recordings/
+**/tokens.json
+**/credentials.json
+**/*.pem
+**/*.key
+**/.coverage
+**/htmlcov/
 

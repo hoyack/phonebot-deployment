@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from phonesys.inband_dtmf import InbandDtmfDetector
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,16 +68,26 @@ class DtmfCollector:
 
     def __init__(self) -> None:
         self._queues: dict[str, asyncio.Queue[str]] = {}
+        self._audio_detectors: dict[str, InbandDtmfDetector] = {}
 
     def feed(self, channel_id: str, digit: str) -> None:
         queue = self._queues.get(channel_id)
         if queue is not None and digit in "0123456789":
             queue.put_nowait(digit)
 
+    def feed_audio(self, channel_id: str, pcm: bytes) -> None:
+        """Feed 8 kHz signed-linear audio while this channel awaits a PIN."""
+        detector = self._audio_detectors.get(channel_id)
+        if detector is None:
+            return
+        for digit in detector.feed(pcm):
+            self.feed(channel_id, digit)
+
     async def collect(self, channel_id: str, length: int,
                       timeout: float = 12.0) -> str | None:
         queue: asyncio.Queue[str] = asyncio.Queue()
         self._queues[channel_id] = queue
+        self._audio_detectors[channel_id] = InbandDtmfDetector()
         digits: list[str] = []
         try:
             async with asyncio.timeout(timeout):
@@ -86,3 +98,4 @@ class DtmfCollector:
             return None
         finally:
             self._queues.pop(channel_id, None)
+            self._audio_detectors.pop(channel_id, None)

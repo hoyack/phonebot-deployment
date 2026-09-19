@@ -1,19 +1,12 @@
-model:
-  default: deepseek/deepseek-v4-flash
-  provider: custom
-  base_url: https://inference-api.nousresearch.com/v1
-  api_key: ${NOUS_API_KEY}
-tts:
-  provider: openai
-  use_gateway: true
-stt:
-  provider: openai
-  use_gateway: true
-mcp_servers: {}
-platform_toolsets:
-  api_server:
-    - no_mcp
+# Reference policy, not a credential-bearing deployable profile.
+# Apply with `hermes -p phonebot config set ...` as documented in docs/SETUP.md.
+# Select provider/model independently with `hermes -p phonebot model`.
+gateway:
+  multiplex_profiles: false
 memory:
   memory_enabled: false
   user_profile_enabled: false
-
+mcp_servers: {}
+platform_toolsets:
+  api_server:
+    - safe

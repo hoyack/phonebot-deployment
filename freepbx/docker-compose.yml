@@ -9,10 +9,9 @@ networks:
     ipam:
       driver: default
       config:
-        # 172.17-172.31 are all taken by other stacks on this host,
-        # and 172.18.0.0/16 would collide with the WSL2 eth0 (172.18.36.168/20).
-        - subnet: 10.77.0.0/24
-          gateway: 10.77.0.1
+        # Choose a subnet that overlaps neither LAN/VPN/WSL nor other stacks.
+        - subnet: ${PBX_SUBNET:-10.77.0.0/24}
+          gateway: ${PBX_GATEWAY:-10.77.0.1}
 
 secrets:
   mysql_root_password:
@@ -28,7 +27,9 @@ services:
     image: mariadb:10.11
     environment:
       MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+      MARIADB_ROOT_HOST: localhost # installer uses freepbxuser, never remote root
       MYSQL_USER: freepbxuser
+      MARIADB_USER_HOST: "%" # PBX connects over the private network, not localhost
       MYSQL_PASSWORD_FILE: /run/secrets/freepbxuser_password
     secrets:
       - mysql_root_password
@@ -37,9 +38,15 @@ services:
       - mysql_data:/var/lib/mysql
       - ./my.cnf:/etc/mysql/my.cnf:ro
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     networks:
       freepbxnet:
-        ipv4_address: 10.77.0.10
+        ipv4_address: ${PBX_DB_IP:-10.77.0.10}
 
   freepbx:
     restart: unless-stopped
@@ -53,25 +60,34 @@ services:
       # Asterisk's own filesystem -- it accepts neither a host path nor a URL --
       # so the bridge and Asterisk must share these two directories.
       # Both nest inside the var_data volume; the bind overlays it at that path.
-      - ${PHONESYS_DIR:-../phonesys}/media/sounds:/var/lib/asterisk/sounds/en/phonesys
-      - ${PHONESYS_DIR:-../phonesys}/media/rec:/var/spool/asterisk/recording
+      - type: bind
+        source: ${PHONESYS_DIR:-../phonesys}/media/sounds
+        target: /var/lib/asterisk/sounds/en/phonesys
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PHONESYS_DIR:-../phonesys}/media/rec
+        target: /var/spool/asterisk/recording
+        bind:
+          create_host_path: false
     networks:
       freepbxnet:
-        ipv4_address: 10.77.0.20
+        ipv4_address: ${PBX_IP:-10.77.0.20}
     ports:
-      - "8080:80/tcp"      # FreePBX admin GUI
-      - "8443:443/tcp"     # HTTPS
+      - "${PBX_ADMIN_BIND:-127.0.0.1}:8080:80/tcp"      # FreePBX admin GUI
+      - "${PBX_ADMIN_BIND:-127.0.0.1}:8443:443/tcp"     # HTTPS
       # ARI. Loopback-only on the host: Asterisk binds 0.0.0.0 inside the
       # container so the docker proxy can reach it, but the published port is
-      # pinned to 127.0.0.1 so ARI is not exposed to the LAN or Windows host.
+      # pinned to 127.0.0.1 so ARI is not exposed on a LAN-facing host interface.
       # Enabled via `fwconsole setting HTTPENABLED 1` (http_additional.conf is
       # auto-generated — never edit it by hand).
       - "127.0.0.1:8088:8088/tcp"
       - "5060:5060/udp"    # PJSIP signalling
-      # Lab-sized RTP range. FreePBX default is 16384-32767; publishing 16k UDP
-      # ports through Docker Desktop is not viable. 100 ports ~= 50 concurrent calls.
+      # Match this RTP span in FreePBX SIP Settings. The Windows relay supports
+      # ONE streaming call at a time, independent of the RTP port count.
       - "10000-10099:10000-10099/udp"
     secrets:
       - postfix_sasl_passwd
     depends_on:
-      - db
+      db:
+        condition: service_healthy

@@ -115,6 +115,25 @@ async def test_originate_audiosocket_pins_slin_format():
     assert seen["app"] == "phonesys"
 
 
+async def test_originate_audiosocket_can_mark_a_preflight_channel():
+    seen = {}
+
+    def handler(request):
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json={"id": "ch-preflight"})
+
+    cid = await _client(handler).originate_audiosocket(
+        "host.docker.internal",
+        19010,
+        "preflight-uuid",
+        "phonesys",
+        app_args="__preflight__",
+    )
+
+    assert cid == "ch-preflight"
+    assert seen["appArgs"] == "__preflight__"
+
+
 async def test_add_to_bridge():
     seen = {}
 

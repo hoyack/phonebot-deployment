@@ -1,0 +1,3 @@
+# Historical README example reads its password using shell substitution from
+# secrets/ari.txt; it contains no literal password. Exact finding only.
+f7270f0c62a3cf359accb6707640992fec527a2a:freepbx/README.upstream-notes.md:curl-auth-user:104

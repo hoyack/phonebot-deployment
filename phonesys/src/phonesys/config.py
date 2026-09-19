@@ -58,7 +58,19 @@ class ExtensionConfig:
     # inactivity timeout). Checked between sentences, never cuts playback.
     hermes_reply_timeout_seconds: float = 30.0
 
+    # Streaming-only, consent-based local call controls. Disabled by default.
+    hold_enabled: bool = False
+    hold_offer_seconds: float = 15.0
+    hold_feedback_seconds: float = 15.0
+    hold_moh_class: str = "phonesys_hold"
+    # Nova-2 hints, not transcript substitutions. Opt-in per extension.
+    stt_keywords: tuple[str, ...] = ()
+
     def __post_init__(self) -> None:
+        for name in ("hold_offer_seconds", "hold_feedback_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
         if (not math.isfinite(self.hermes_reply_timeout_seconds)
                 or self.hermes_reply_timeout_seconds <= 0):
             raise ValueError("hermes_reply_timeout_seconds must be finite and positive")
@@ -129,6 +141,11 @@ def load_config(path: Path) -> Config:
             hermes_reply_timeout_seconds=float(
                 ext.get("hermes_reply_timeout_seconds", 30.0)
             ),
+            hold_enabled=bool(ext.get("hold_enabled", False)),
+            hold_offer_seconds=float(ext.get("hold_offer_seconds", 15.0)),
+            hold_feedback_seconds=float(ext.get("hold_feedback_seconds", 15.0)),
+            hold_moh_class=str(ext.get("hold_moh_class", "phonesys_hold")),
+            stt_keywords=tuple(ext.get("stt_keywords") or ()),
             mode=ext.get("mode", "turn"),
             barge_in_confirm_ms=int(ext.get("barge_in_confirm_ms", 300)),
             audiosocket_host=ext.get("audiosocket_host", "host.docker.internal"),

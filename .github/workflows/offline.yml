@@ -1,0 +1,61 @@
+name: Offline verification
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: '0.9.26'
+          python-version: ${{ matrix.python }}
+      - name: Locked bridge dependencies
+        working-directory: phonesys
+        run: uv sync --frozen --extra dev
+      - name: Offline bridge tests (no calls or provider secrets)
+        working-directory: phonesys
+        run: uv run --frozen --extra dev python -m pytest -q -m 'not live'
+      - name: Fresh-install helper regression tests
+        run: phonesys/.venv/bin/python -m pytest -q tests_deployment
+      - name: PBX fresh-install helper tests
+        run: python3 -m unittest discover -s freepbx -p 'test_*.py'
+      - name: Shell syntax
+        run: for file in scripts/*.sh freepbx/*.sh; do bash -n "$file"; done
+      - name: Patch hygiene
+        run: git diff --check
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Verify pinned Gitleaks binary and scan history
+        run: |
+          curl --fail --silent --show-error --location --output /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          python -c "import hashlib; assert hashlib.sha256(open('/tmp/gitleaks.tar.gz','rb').read()).hexdigest() == '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks git --redact --no-banner .
+  windows-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Parse PowerShell helpers without running them
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem windows -Filter *.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; $failed = $true }
+          }
+          if ($failed) { exit 1 }

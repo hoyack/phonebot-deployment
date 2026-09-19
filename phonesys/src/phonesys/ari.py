@@ -38,6 +38,15 @@ class AriClient:
             raise AriError(f"{path} failed: HTTP {resp.status_code}", resp.status_code)
         return resp
 
+    async def start_moh(self, channel_id: str, moh_class: str) -> None:
+        """Play only to the caller, never into the AudioSocket bridge leg."""
+        await self._post(f"/channels/{channel_id}/moh", {"mohClass": moh_class})
+
+    async def stop_moh(self, channel_id: str) -> None:
+        resp = await self._client.delete(f"/channels/{channel_id}/moh")
+        if resp.status_code >= 400 and resp.status_code != 404:
+            raise AriError(f"stop_moh failed: HTTP {resp.status_code}", resp.status_code)
+
     async def answer(self, channel_id: str) -> None:
         await self._post(f"/channels/{channel_id}/answer")
 
@@ -88,18 +97,28 @@ class AriClient:
         if resp.status_code >= 400 and resp.status_code != 404:
             raise AriError(f"destroy_bridge failed: HTTP {resp.status_code}", resp.status_code)
 
-    async def originate_audiosocket(self, host: str, port: int, uuid: str, app: str) -> str:
+    async def originate_audiosocket(
+        self,
+        host: str,
+        port: int,
+        uuid: str,
+        app: str,
+        app_args: str | None = None,
+    ) -> str:
         """Originate an AudioSocket channel.
 
         formats=slin is mandatory. The parameter is plural: 'format' belongs to
         externalMedia, is ignored here, and the channel driver then negotiates
         its highest capability (slin192 -- 192kHz, 7680-byte frames).
         """
-        resp = await self._post("/channels", {
+        params = {
             "endpoint": f"AudioSocket/{host}:{port}/{uuid}",
             "app": app,
             "formats": "slin",
-        })
+        }
+        if app_args is not None:
+            params["appArgs"] = app_args
+        resp = await self._post("/channels", params)
         return resp.json()["id"]
 
     async def events(self) -> AsyncIterator[dict]:

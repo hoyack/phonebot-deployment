@@ -139,6 +139,11 @@ class FakeAudio:
 
     MAX_INBOUND = 2000   # safety net so a misbehaving test cannot spin forever
 
+    def suppress_inbound_audio(self):
+        # No inbound queue/PIN PCM in this state-machine fake. Real audio
+        # privacy is exercised with AudioSocketSession in test_pin_audio_privacy.
+        return contextlib.nullcontext()
+
     def __init__(self, frame_delay: float = 0.001, send_delay: float = 0.001,
                  track_concurrency: bool = False) -> None:
         self.frame_delay = frame_delay
@@ -677,7 +682,7 @@ async def test_mary_transfers_to_atlas_only_after_correct_pin():
             return
         spoken = audio.spoken_text[-1]
         if spoken == mary.greeting:
-            stt.emit(_final("transfer me to Atlas"))
+            stt.emit(_final("I need Atlas."))
             stt.emit(_utt_end())
         elif spoken == atlas.greeting:
             audio.hangup.set()

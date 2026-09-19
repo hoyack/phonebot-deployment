@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import logging
 import random
+import re
 import secrets
 import uuid as uuid_mod
 from typing import Callable, Sequence
@@ -63,6 +64,11 @@ TEARDOWN_TIMEOUT = 5.0
 # accumulated and never answered. It is deliberately well above 1s so it
 # cannot pre-empt a real UtteranceEnd and split one utterance in two.
 UTTERANCE_END_FALLBACK = 3.0
+
+# An endpoint is a pause, not permission to seize the floor after barge-in.
+# Atlas gives a reclaimed floor two further seconds to assemble a follow-up.
+# Renewed speech invalidates the endpoint; provider/PBX timers stay unchanged.
+POST_BARGE_QUIET_SECONDS = 2.0
 
 # Said aloud when transcription dies mid-call. The design's error table says
 # to apologize and end rather than drop the line silently; a caller who hears
@@ -129,6 +135,21 @@ class SpeechBurst:
             self._start = None
             return True
         return False
+
+
+class InterruptSignal(asyncio.Event):
+    """Latch the confirmed STT edge, not the later audio-waiter wakeup."""
+
+    confirmed_at: float | None = None
+
+    def set(self) -> None:
+        if not self.is_set():
+            self.confirmed_at = asyncio.get_running_loop().time()
+        super().set()
+
+    def clear(self) -> None:
+        super().clear()
+        self.confirmed_at = None
 
 
 class HeardTracker:
@@ -315,6 +336,21 @@ class StreamingCallHandler:
         """
         if not target_ext.access_pin:
             return True
+        # Drop pre-auth backlog and suppress the entire prompt/collection/
+        # retry window, not merely the tones. This also protects transfers
+        # while their existing STT pump is running. Require the boundary:
+        # an unsupported session adapter must fail closed, never bypass it.
+        with audio.suppress_inbound_audio():
+            return await self._collect_pin(audio, speaking_ext, target_ext, channel_id)
+
+    async def _collect_pin(
+        self,
+        audio: AudioSocketSession,
+        speaking_ext: ExtensionConfig,
+        target_ext: ExtensionConfig,
+        channel_id: str,
+    ) -> bool:
+        """Collect locally, with the caller holding the PCM privacy window."""
         if self._dtmf is None:
             logger.error(
                 "call %s: PIN-protected extension %s has no DTMF collector",
@@ -324,31 +360,51 @@ class StreamingCallHandler:
             return False
 
         digit_count = len(target_ext.access_pin)
-        for attempt in range(3):
-            # Arm collection before speaking so callers may begin typing
-            # during the prompt without losing the first digit.
-            pin_task = asyncio.create_task(
-                self._dtmf.collect(channel_id, digit_count, timeout=15.0)
-            )
-            try:
-                await asyncio.sleep(0)
-                prompt = (
-                    f"Please enter your {digit_count}-digit PIN using the "
-                    "telephone keypad."
-                    if attempt == 0 else
-                    "That PIN was not correct. Please try again."
+        logger.info(
+            "call %s: starting PIN authentication for profile %s (%d digits)",
+            channel_id,
+            target_ext.profile,
+            digit_count,
+        )
+        audio_listener = lambda pcm: self._dtmf.feed_audio(channel_id, pcm)
+        add_listener = getattr(audio, "add_inbound_listener", None)
+        remove_listener = getattr(audio, "remove_inbound_listener", None)
+        if add_listener is not None:
+            add_listener(audio_listener)
+        try:
+            for attempt in range(3):
+                # Arm collection before speaking so callers may begin typing
+                # during the prompt without losing the first digit.
+                pin_task = asyncio.create_task(
+                    self._dtmf.collect(channel_id, digit_count, timeout=15.0)
                 )
-                await self._speak(audio, speaking_ext, [prompt])
-                entered = await pin_task
-            finally:
-                if not pin_task.done():
-                    pin_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await pin_task
-            if entered is not None and secrets.compare_digest(
-                entered, target_ext.access_pin
-            ):
-                return True
+                try:
+                    await asyncio.sleep(0)
+                    prompt = (
+                        f"Please enter your {digit_count}-digit PIN using the "
+                        "telephone keypad."
+                        if attempt == 0 else
+                        "That PIN was not correct. Please try again."
+                    )
+                    await self._speak(audio, speaking_ext, [prompt])
+                    entered = await pin_task
+                finally:
+                    if not pin_task.done():
+                        pin_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await pin_task
+                if entered is not None and secrets.compare_digest(
+                    entered, target_ext.access_pin
+                ):
+                    logger.info(
+                        "call %s: PIN authentication succeeded for profile %s",
+                        channel_id,
+                        target_ext.profile,
+                    )
+                    return True
+        finally:
+            if remove_listener is not None:
+                remove_listener(audio_listener)
 
         logger.info(
             "call %s: PIN authentication failed for profile %s",
@@ -361,6 +417,7 @@ class StreamingCallHandler:
                      ext: ExtensionConfig) -> None:
         hermes = self._hermes_factory(ext)
         stt = self._stt_factory()
+        stt.call_id = channel_id
         session_id = f"call-{channel_id}"
         call_uuid = str(uuid_mod.uuid4())
         bridge_id: str | None = None
@@ -376,7 +433,7 @@ class StreamingCallHandler:
         # before `utterance_ready` catches up -- see speak_sentence's guard.
         # ended: the call is over (caller gone, or STT died and the agent is
         # deaf for the rest of the call, which amounts to the same thing).
-        interrupt = asyncio.Event()
+        interrupt = InterruptSignal()
         utterance_ready = asyncio.Event()
         final_seen = asyncio.Event()
         ended = asyncio.Event()
@@ -421,35 +478,53 @@ class StreamingCallHandler:
                 return
 
             await hermes.create_session(session_id)
+            if ext.stt_keywords:
+                stt.set_keywords(ext.stt_keywords)
             await stt.connect()
+            # Serialize reconnect with sends; never cancel a frame mid-write.
+            stt_lock = asyncio.Lock()
+
+            def stream_ended(outcome):
+                safe_id = channel_id if re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', channel_id) else 'redacted'
+                fields = dict(event='call.stream_ended', call_id=safe_id,
+                              outcome=outcome, audio_ended=audio_ended.is_set(),
+                              stt_ended=stt_ended.is_set())
+                logger.info('event=call.stream_ended call=%s outcome=%s audio_ended=%s stt_ended=%s',
+                            safe_id, outcome, fields['audio_ended'], fields['stt_ended'], extra=fields)
 
             async def pump_audio() -> None:
-                """Forward every inbound frame to STT, in every state.
+                """Forward non-private inbound frames to STT in every call state.
 
+                AudioSocketSession keeps authentication-window PCM local.
                 Never pauses while the agent speaks (see module docstring),
                 and never retries a send that timed out -- that means the
                 websocket is dead, and a retry risks a corrupt half-frame.
                 """
+                outcome = 'audio_eof'
                 try:
                     async for frame in audio.frames():
                         try:
-                            await stt.send(frame)
+                            async with stt_lock:
+                                await stt.send(frame)
                         except asyncio.TimeoutError:
-                            logger.warning(
-                                "call %s: STT send timed out; connection is "
-                                "dead, stopping the pump", channel_id,
-                            )
+                            outcome = 'stt_send_timeout'
                             return
                         except Exception:
-                            logger.exception("call %s: STT send failed", channel_id)
+                            outcome = 'stt_send_error'
                             return
+                except asyncio.CancelledError:
+                    outcome = 'audio_cancelled'
+                    raise
+                except Exception:
+                    outcome = 'audio_error'
                 finally:
-                    # Inbound audio stopping means the caller hung up (or the
-                    # transcriber is gone). Either way the conversation is over
-                    # and the main loop must not keep waiting on an interrupt
-                    # that can no longer arrive.
-                    audio_ended.set()
-                    ended.set()
+                    if outcome.startswith('stt_'):
+                        stt_ended.set()
+                    elif outcome != 'audio_cancelled':
+                        audio_ended.set()
+                    if outcome != 'audio_cancelled':
+                        ended.set()
+                    stream_ended(outcome)
 
             burst = SpeechBurst(ext.barge_in_confirm_ms, loop.time)
             # Finals accumulate here until Deepgram says the utterance is over.
@@ -465,11 +540,67 @@ class StreamingCallHandler:
             # 0.0 rather than loop.time(): before any speech there is no voice
             # to be newer than `idle_since`, and max() must not pick this.
             last_voice_at = 0.0
+            reply_active = False
+            floor_reclaimed = False
+            floor_activity_at = 0.0
+            floor_endpoint_at = 0.0
+
+            def pending_stalled():
+                return (utterance_parts and not utterance_ready.is_set()
+                        and loop.time() - max(last_final_at,
+                            floor_activity_at if floor_reclaimed else 0)
+                        >= UTTERANCE_END_FALLBACK)
+
+            def read_pending():
+                if not utterance_ready.is_set() and not pending_stalled():
+                    return ""
+                pending = " ".join(utterance_parts).strip()
+                if floor_reclaimed and utterance_ready.is_set():
+                    from phonesys.hold import control_intent
+                    # Consent and explicit local controls retain their
+                    # existing immediate endpoint behavior.
+                    if (control_intent(pending, offered=True) is None
+                            and loop.time() - max(floor_activity_at, floor_endpoint_at)
+                            < POST_BARGE_QUIET_SECONDS):
+                        return ""
+                return pending
+
+            def consume_pending():
+                nonlocal floor_reclaimed
+                floor_reclaimed = False
+                utterance_parts.clear()
+                utterance_ready.clear()
+                interrupt.clear()
+                final_seen.clear()
+
+            def caller_has_floor():
+                nonlocal floor_reclaimed
+                if not floor_reclaimed:
+                    return False
+                if utterance_parts or (
+                        loop.time() - floor_activity_at < UTTERANCE_END_FALLBACK):
+                    return True
+                floor_reclaimed = False
+                return False
 
             async def pump_stt() -> None:
                 nonlocal last_final_at, last_voice_at
+                nonlocal floor_reclaimed, floor_activity_at, floor_endpoint_at
+                cancelled = False
+                outcome = 'stt_eof'
                 try:
                     async for ev in stt.events():
+                        if (ext.profile == 'atlas' and ext.hold_enabled
+                                and ev.kind in ('speech_started', 'transcript')):
+                            floor_activity_at = loop.time()
+                            if reply_active:
+                                floor_reclaimed = True
+                            if floor_reclaimed:
+                                # A new interim can precede its final by seconds.
+                                # Never hand off banked finals under a stale end.
+                                utterance_ready.clear()
+                        if ev.kind == 'utterance_end':
+                            floor_endpoint_at = loop.time()
                         if ev.kind == "speech_started":
                             burst.reset()
                             # Deepgram's VAD says there is a voice on the line
@@ -534,9 +665,19 @@ class StreamingCallHandler:
                             # finals before they are ever banked.
                             if utterance_parts:
                                 utterance_ready.set()
+                except asyncio.CancelledError:
+                    cancelled = True
+                    outcome = 'stt_cancelled'
+                    raise
+                except Exception:
+                    # The transport logs safe close metadata. Never log its
+                    # exception string, which may contain a raw close reason.
+                    outcome = 'stt_error'
                 finally:
-                    stt_ended.set()
-                    ended.set()
+                    if not cancelled:
+                        stt_ended.set()
+                        ended.set()
+                    stream_ended(outcome)
 
             tasks = [asyncio.create_task(pump_audio()),
                      asyncio.create_task(pump_stt())]
@@ -559,6 +700,7 @@ class StreamingCallHandler:
             # extension that has not opted in gets.
             idle_seconds = ext.idle_hangup_seconds
             idle_since = loop.time()
+            delivery_notes: list[str] = []
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -591,7 +733,12 @@ class StreamingCallHandler:
                     wait_for = min(wait_for, max(
                         0.0, UTTERANCE_END_FALLBACK - (loop.time() - last_final_at)
                     ))
-                await _wait_any((interrupt, utterance_ready, ended), timeout=wait_for)
+                if caller_has_floor():
+                    # A latched endpoint must not spin the listening loop or
+                    # bypass floor settling when the previous work expired.
+                    await _wait_any((interrupt, ended), timeout=min(0.02, remaining))
+                else:
+                    await _wait_any((interrupt, utterance_ready, ended), timeout=wait_for)
                 if interrupt.is_set():
                     # The contract _reply is entered under: `interrupt` is
                     # CLEAR at entry. It is almost always set here -- the
@@ -605,13 +752,12 @@ class StreamingCallHandler:
                     # this loop besides. speak_sentence's own `index == 0`
                     # guard cannot save it: that runs AFTER stop_filler().
                     interrupt.clear()
-                stalled = (utterance_parts and not utterance_ready.is_set()
-                           and loop.time() - last_final_at >= UTTERANCE_END_FALLBACK)
+                stalled = pending_stalled()
                 if stalled:
                     logger.warning("call %s: no UtteranceEnd after %ss; "
                                    "replying anyway", channel_id,
                                    UTTERANCE_END_FALLBACK)
-                if utterance_ready.is_set() or stalled:
+                if read_pending():
                     utterance_ready.clear()
                     # Cleared here, not inside _reply: a stale set flag from
                     # the utterance just answered must not survive into the
@@ -656,6 +802,14 @@ class StreamingCallHandler:
                                         [f"Certainly. I'll transfer you to {person.full_name}."],
                                     )
                                     await hermes.aclose()
+                                    if target.stt_keywords != ext.stt_keywords:
+                                        async with stt_lock:
+                                            tasks[1].cancel()
+                                            await asyncio.gather(tasks[1], return_exceptions=True)
+                                            await stt.close()
+                                            stt.set_keywords(target.stt_keywords)
+                                            await stt.connect()
+                                            tasks[1] = asyncio.create_task(pump_stt())
                                     ext = target
                                     hermes = self._hermes_factory(ext)
                                     session_id = f"call-{channel_id}-{person.extension}"
@@ -690,13 +844,23 @@ class StreamingCallHandler:
                         # turn-detection problem rather than a generation
                         # one.
                         t0 = loop.time()
+                        suppress_ack = floor_reclaimed
+                        floor_reclaimed = False
+                        reply_active = True
                         await self._reply(audio, ext, hermes, session_id,
                                           utterance, interrupt=interrupt,
                                           utterance_ready=utterance_ready,
                                           final_seen=final_seen, ended=ended,
                                           deadline=deadline, t0=t0,
+                                          channel_id=channel_id,
+                                          read_utterance=read_pending,
+                                          consume=consume_pending,
+                                          suppress_ack=suppress_ack,
+                                          caller_has_floor=caller_has_floor,
+                                          delivery_notes=delivery_notes,
                                           trigger=("stalled" if stalled
                                                    else "utterance_ready"))
+                        reply_active = False
                         # Restart the idle clock the moment the bridge is
                         # listening again. Anchoring it to when the caller last
                         # SPOKE instead would charge the agent's own reply --
@@ -856,7 +1020,41 @@ class StreamingCallHandler:
                      # care about latency numbers, and handle() -- the only
                      # real caller -- always passes both explicitly.
                      t0: float | None = None,
-                     trigger: str = "utterance_ready") -> None:
+                     trigger: str = "utterance_ready",
+                     channel_id: str = "",
+                     read_utterance: Callable[[], str] = lambda: "",
+                     consume: Callable[[], None] = lambda: None,
+                     suppress_ack: bool = False,
+                     caller_has_floor: Callable[[], bool] = lambda: False,
+                     delivery_notes: list[str] | None = None) -> None:
+        # An intentionally tiny guard for the observed clipped Atlas request.
+        # Do not infer completeness from generic trailing words, rewrite
+        # product names, or guess a research topic. General ambiguity belongs
+        # to the profile's clarification policy, not a linguistic heuristic.
+        normalized = ' '.join(re.sub(r'[.?!,]', ' ', utterance.lower()).split())
+        clarification = ''
+        if ext.profile == 'atlas' and normalized in (
+            'can you look into what you have been',
+            'okay can you look into what you have been',
+        ):
+            clarification = ('I may have missed the end of that. Could you finish your question? '
+                             'Please repeat the full request.')
+        if ext.hold_enabled or clarification:
+            from phonesys.hold import run_hold_reply
+            if delivery_notes and not clarification:
+                utterance = '\n'.join(delivery_notes) + '\nCaller request: ' + utterance
+                delivery_notes.clear()
+            await run_hold_reply(
+                audio=audio, ext=ext, hermes=hermes, session_id=session_id,
+                utterance=utterance, ari=self._ari, channel_id=channel_id,
+                ended=ended, deadline=deadline, read_utterance=read_utterance,
+                consume=consume, tts=self._tts,
+                local_reply=clarification, interrupt=interrupt, final_seen=final_seen, t0=t0,
+                tracker=HeardTracker(), delivery_notes=delivery_notes,
+                suppress_ack=suppress_ack,
+                caller_has_floor=caller_has_floor,
+            )
+            return
         buf = SentenceBuffer()
         tracker = HeardTracker()
         loop = asyncio.get_running_loop()
