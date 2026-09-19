@@ -26,6 +26,25 @@ extensions:
 """
 
 
+@pytest.mark.parametrize("raw, expected", [("", 30.0), ("    hermes_reply_timeout_seconds: 12.5\n", 12.5)])
+def test_hermes_reply_budget_config(tmp_path, monkeypatch, raw, expected):
+    monkeypatch.setenv("ARI_USER", "phonesys")
+    monkeypatch.setenv("ARI_PASSWORD", "secret")
+    monkeypatch.setenv("HERMES_PHONEBOT_API_KEY", "hkey")
+    cfg = load_config(_write(tmp_path, CONFIG_YAML + raw))
+    assert cfg.extensions["7000"].hermes_reply_timeout_seconds == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", ".nan", ".inf"])
+def test_hermes_reply_budget_rejects_unbounded_values(tmp_path, monkeypatch, raw):
+    monkeypatch.setenv("ARI_USER", "phonesys")
+    monkeypatch.setenv("ARI_PASSWORD", "secret")
+    monkeypatch.setenv("HERMES_PHONEBOT_API_KEY", "hkey")
+    with pytest.raises(ValueError, match="hermes_reply_timeout_seconds"):
+        load_config(_write(tmp_path, CONFIG_YAML +
+                           f"    hermes_reply_timeout_seconds: {raw}\n"))
+
+
 def test_loads_extension(tmp_path, monkeypatch):
     monkeypatch.setenv("ARI_USER", "phonesys")
     monkeypatch.setenv("ARI_PASSWORD", "secret")
@@ -68,6 +87,7 @@ STREAMING_YAML = CONFIG_YAML + """
     barge_in_confirm_ms: 300
     audiosocket_host: host.docker.internal
     audiosocket_port: 9010
+    audiosocket_listen_port: 19010
 """
 
 
@@ -122,6 +142,7 @@ def test_mode_defaults_to_turn_and_streaming_is_read(tmp_path, monkeypatch):
     assert s.mode == "streaming"
     assert s.barge_in_confirm_ms == 300
     assert s.audiosocket_port == 9010
+    assert s.audiosocket_listen_port == 19010
 
 
 def test_filler_defaults_to_disabled(tmp_path, monkeypatch):
@@ -226,6 +247,30 @@ def test_shipped_config_gives_7001_an_idle_hangup_and_7000_none(monkeypatch):
     monkeypatch.setenv("ARI_USER", "phonesys")
     monkeypatch.setenv("ARI_PASSWORD", "secret")
     monkeypatch.setenv("HERMES_PHONEBOT_API_KEY", "hkey")
+    # Every configured protected profile needs test-only credentials; do not
+    # depend on a developer's live .env to exercise the shipped YAML.
+    monkeypatch.setenv("JOHN_YODER_PIN", "123456")
+    monkeypatch.setenv("HERMES_ATLAS_API_KEY", "atlas-test-key")
+    monkeypatch.setenv("ATLAS_PIN", "24681357")
     cfg = load_config(Path(__file__).resolve().parents[1] / "config.yaml")
     assert cfg.extensions["7001"].idle_hangup_seconds == 10
     assert cfg.extensions["7000"].idle_hangup_seconds == 0
+
+
+def test_shipped_atlas_extension_is_private_and_directory_listed(monkeypatch):
+    monkeypatch.setenv("ARI_USER", "phonesys")
+    monkeypatch.setenv("ARI_PASSWORD", "secret")
+    monkeypatch.setenv("HERMES_PHONEBOT_API_KEY", "phone-key")
+    monkeypatch.setenv("JOHN_YODER_PIN", "123456")
+    monkeypatch.setenv("HERMES_ATLAS_API_KEY", "atlas-key")
+    monkeypatch.setenv("ATLAS_PIN", "24681357")
+
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.yaml")
+    atlas = cfg.extensions["7003"]
+
+    assert atlas.profile == "atlas"
+    assert atlas.hermes_base_url == "http://127.0.0.1:8644"
+    assert atlas.hermes_api_key == "atlas-key"
+    assert atlas.access_pin == "24681357"
+    assert atlas.directory_listing
+    assert atlas.full_name == "Atlas Assistant"

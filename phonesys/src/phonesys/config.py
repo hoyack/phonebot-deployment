@@ -1,6 +1,7 @@
 """Configuration loading. Secrets come from the environment, never from YAML."""
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,9 @@ class ExtensionConfig:
     barge_in_confirm_ms: int = 300
     audiosocket_host: str = "host.docker.internal"
     audiosocket_port: int = 9010
+    # Optional local bind port when a host-side proxy fronts AudioSocket.
+    # None preserves the historical behavior: listen on audiosocket_port.
+    audiosocket_listen_port: int | None = None
     # Filler speech (streaming mode only). filler_delay_ms == 0 disables it,
     # which is the default: an extension that does not opt in behaves exactly
     # as it did before filler existed.
@@ -50,6 +54,26 @@ class ExtensionConfig:
     directory_listing: bool = False
     greeting_delay_ms: int = 0
     access_pin: str = ""
+    # Absolute monotonic budget for obtaining reply deltas (not an HTTP
+    # inactivity timeout). Checked between sentences, never cuts playback.
+    hermes_reply_timeout_seconds: float = 30.0
+
+    # Streaming-only, consent-based local call controls. Disabled by default.
+    hold_enabled: bool = False
+    hold_offer_seconds: float = 15.0
+    hold_feedback_seconds: float = 15.0
+    hold_moh_class: str = "phonesys_hold"
+    # Nova-2 hints, not transcript substitutions. Opt-in per extension.
+    stt_keywords: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("hold_offer_seconds", "hold_feedback_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if (not math.isfinite(self.hermes_reply_timeout_seconds)
+                or self.hermes_reply_timeout_seconds <= 0):
+            raise ValueError("hermes_reply_timeout_seconds must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -114,10 +138,23 @@ def load_config(path: Path) -> Config:
             max_silence_seconds=int(ext.get("max_silence_seconds", 2)),
             max_turn_seconds=int(ext.get("max_turn_seconds", 30)),
             max_call_seconds=int(ext.get("max_call_seconds", 600)),
+            hermes_reply_timeout_seconds=float(
+                ext.get("hermes_reply_timeout_seconds", 30.0)
+            ),
+            hold_enabled=bool(ext.get("hold_enabled", False)),
+            hold_offer_seconds=float(ext.get("hold_offer_seconds", 15.0)),
+            hold_feedback_seconds=float(ext.get("hold_feedback_seconds", 15.0)),
+            hold_moh_class=str(ext.get("hold_moh_class", "phonesys_hold")),
+            stt_keywords=tuple(ext.get("stt_keywords") or ()),
             mode=ext.get("mode", "turn"),
             barge_in_confirm_ms=int(ext.get("barge_in_confirm_ms", 300)),
             audiosocket_host=ext.get("audiosocket_host", "host.docker.internal"),
             audiosocket_port=int(ext.get("audiosocket_port", 9010)),
+            audiosocket_listen_port=(
+                int(ext["audiosocket_listen_port"])
+                if "audiosocket_listen_port" in ext
+                else None
+            ),
             filler_delay_ms=int(ext.get("filler_delay_ms", 0)),
             filler_repeat_ms=int(ext.get("filler_repeat_ms", 3000)),
             filler_phrases=tuple(

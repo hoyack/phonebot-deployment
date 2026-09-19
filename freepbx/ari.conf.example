@@ -1,0 +1,10 @@
+; Private deployment copy only: replace placeholder before installing.
+; Merge with existing ari.conf general section; preserve FreePBX includes.
+[general]
+enabled = yes
+pretty = no
+
+[phonesys]
+type = user
+read_only = no
+password = REPLACE_WITH_UNIQUE_ARI_SECRET

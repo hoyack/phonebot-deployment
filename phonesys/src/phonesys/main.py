@@ -112,18 +112,19 @@ async def _start_streaming(cfg, ari: AriClient,
         logger.info("no streaming-mode extension configured; audiosocket listener not started")
         return None
 
-    # audiosocket_port is sourced from the extension's config, not a
-    # hardcoded constant, so that editing config.yaml's port actually
-    # changes where this process listens (see task-9 fix round 1, finding
-    # 2). audiosocket_host is deliberately NOT used here -- see the
-    # AUDIOSOCKET_LISTEN_HOST comment above.
+    # By default the local listener uses audiosocket_port, preserving the
+    # original direct-connect behavior. A distinct audiosocket_listen_port
+    # supports a Windows-side proxy: Asterisk dials the Windows port while
+    # this WSL process keeps its own stable local port. audiosocket_host is
+    # deliberately NOT used here -- see AUDIOSOCKET_LISTEN_HOST above.
     #
     # Construction is INSIDE the try: asyncio.start_server is not the only
     # thing here that can raise OSError, and anything that escapes this
     # function takes extension 7000 down with it.
+    listen_port = ext.audiosocket_listen_port or ext.audiosocket_port
     try:
         as_server = AudioSocketServer(
-            host=AUDIOSOCKET_LISTEN_HOST, port=ext.audiosocket_port
+            host=AUDIOSOCKET_LISTEN_HOST, port=listen_port
         )
         await as_server.start()
     except OSError as exc:
@@ -131,7 +132,7 @@ async def _start_streaming(cfg, ari: AriClient,
             "audiosocket listener failed to bind %s:%s (%s); streaming "
             "extensions will be rejected until this process restarts, "
             "turn-based extensions are unaffected",
-            AUDIOSOCKET_LISTEN_HOST, ext.audiosocket_port, exc,
+            AUDIOSOCKET_LISTEN_HOST, listen_port, exc,
         )
         return None
 

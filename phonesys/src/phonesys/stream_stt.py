@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import AsyncIterator
 from urllib.parse import urlencode
@@ -88,7 +89,8 @@ class LiveStt:
     def __init__(self, api_key: str, sample_rate: int = 8000,
                  model: str = "nova-2-phonecall") -> None:
         self._api_key = api_key
-        self._params = {
+        self.call_id = ''
+        self._params: dict[str, str | tuple[str, ...]] = {
             "model": model,
             "encoding": "linear16",
             "sample_rate": str(sample_rate),
@@ -102,8 +104,20 @@ class LiveStt:
         }
         self._ws: websockets.ClientConnection | None = None
 
+    def set_keywords(self, keywords: tuple[str, ...]) -> None:
+        """Set next connection's Nova-2 vocabulary; never rewrite transcripts.
+
+        https://developers.deepgram.com/docs/keywords documents keywords for
+        Nova-2 (including phonecall), not Nova-3's unweighted keyterm API.
+        """
+        if keywords and self._params['model'] not in ('nova-2', 'nova-2-phonecall'):
+            raise ValueError('Vocabulary hints require a supported Nova-2 model')
+        self._params.pop('keywords', None)
+        if keywords:
+            self._params['keywords'] = keywords
+
     async def connect(self) -> None:
-        url = f"{DEEPGRAM_WS}?{urlencode(self._params)}"
+        url = f"{DEEPGRAM_WS}?{urlencode(self._params, doseq=True)}"
         # additional_headers is the websockets>=14 keyword; older releases
         # used extra_headers instead. pyproject.toml pins websockets>=14.0,
         # so this call is valid for every installable version -- if this
@@ -123,10 +137,32 @@ class LiveStt:
     async def events(self) -> AsyncIterator[SttEvent]:
         if self._ws is None:
             return
-        async for raw in self._ws:
-            ev = parse_dg_message(raw if isinstance(raw, str) else raw.decode())
-            if ev is not None:
-                yield ev
+        ws = self._ws
+        outcome = 'eof'
+        try:
+            async for raw in ws:
+                ev = parse_dg_message(raw if isinstance(raw, str) else raw.decode())
+                if ev is not None:
+                    yield ev
+        except asyncio.CancelledError:
+            outcome = 'cancelled'
+            raise
+        except Exception:
+            outcome = 'error'
+            raise
+        finally:
+            # Free-form close reasons can contain credentials or reflected
+            # input. Retain only Deepgram's diagnostic code, never its prose.
+            reason = getattr(ws, 'close_reason', '') or ''
+            match = re.match(r'^(?:NET|DATA)-[0-9]{4}(?=$|[\s:])', reason)
+            safe_reason = match.group(0) if match else ('redacted' if reason else 'empty')
+            code = getattr(ws, 'close_code', None)
+            code = code if isinstance(code, int) and 1000 <= code <= 4999 else None
+            call_id = self.call_id if re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', self.call_id) else 'redacted'
+            fields = dict(event='stt.closed', call_id=call_id, outcome=outcome,
+                          close_code=code, close_reason=safe_reason)
+            logger.info('event=stt.closed call=%s outcome=%s code=%s reason=%s',
+                        call_id, outcome, code, safe_reason, extra=fields)
 
     async def close(self) -> None:
         if self._ws is not None:

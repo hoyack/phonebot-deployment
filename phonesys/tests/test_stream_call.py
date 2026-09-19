@@ -139,6 +139,11 @@ class FakeAudio:
 
     MAX_INBOUND = 2000   # safety net so a misbehaving test cannot spin forever
 
+    def suppress_inbound_audio(self):
+        # No inbound queue/PIN PCM in this state-machine fake. Real audio
+        # privacy is exercised with AudioSocketSession in test_pin_audio_privacy.
+        return contextlib.nullcontext()
+
     def __init__(self, frame_delay: float = 0.001, send_delay: float = 0.001,
                  track_concurrency: bool = False) -> None:
         self.frame_delay = frame_delay
@@ -333,6 +338,22 @@ class FakeHermes:
         self.closed = True
 
 
+class ScriptedDtmf:
+    """Returns configured PIN attempts, optionally held behind a gate."""
+
+    def __init__(self, values, gate: asyncio.Event | None = None) -> None:
+        self._values = list(values)
+        self._gate = gate
+        self.calls: list[tuple[str, int, float]] = []
+
+    async def collect(self, channel_id: str, length: int,
+                      timeout: float) -> str | None:
+        self.calls.append((channel_id, length, timeout))
+        if self._gate is not None:
+            await self._gate.wait()
+        return self._values.pop(0)
+
+
 class ScriptedHermes(FakeHermes):
     """A DIFFERENT reply per chat_stream call.
 
@@ -524,16 +545,20 @@ class FakeBank:
 
 def _handler(ari=None, stt=None, tts=None, hermes=None, server=None,
              ari_app="phonesys", filler_bank=None,
-             greeting_frames=None) -> StreamingCallHandler:
+             greeting_frames=None, extensions=None, filler_profile=None,
+             dtmf=None, hermes_factory=None) -> StreamingCallHandler:
     return StreamingCallHandler(
         ari=ari or FakeAri(),
         stt_factory=lambda: stt,
         tts=tts or FakeTts(),
-        hermes_factory=lambda ext: hermes,
+        hermes_factory=hermes_factory or (lambda ext: hermes),
         audiosocket_server=server,
         ari_app=ari_app,
         filler_bank=filler_bank,
         greeting_frames=greeting_frames,
+        extensions=extensions,
+        filler_profile=filler_profile,
+        dtmf=dtmf,
     )
 
 
@@ -560,6 +585,129 @@ async def _until(predicate, limit: int = 500) -> None:
             return
         await asyncio.sleep(0.001)
     raise AssertionError("condition never became true")
+
+
+async def test_direct_protected_extension_authenticates_before_hermes_session():
+    audio = FakeAudio(send_delay=0.001)
+    stt = FakeStt(audio=audio)
+    tts = FakeTts(frames_per_sentence=2)
+    hermes = FakeHermes()
+    gate = asyncio.Event()
+    dtmf = ScriptedDtmf(["24681357"], gate=gate)
+    ext = _ext(access_pin="24681357")
+
+    def hang_up_after_greeting(index, count):
+        if count == 2 and audio.spoken_text[-1] == ext.greeting:
+            audio.hangup.set()
+
+    audio.on_sent_hook = hang_up_after_greeting
+    handler = _handler(
+        stt=stt, tts=tts, hermes=hermes, server=FakeServer(audio), dtmf=dtmf,
+    )
+
+    call = asyncio.create_task(handler.handle("chan-pin", "7003", ext))
+    await _until(lambda: bool(dtmf.calls))
+    assert hermes.sessions == [], (
+        "the privileged Hermes session was created before PIN verification"
+    )
+    assert not stt.connected, "speech transcription started before PIN verification"
+    gate.set()
+    await asyncio.wait_for(call, timeout=2)
+
+    assert hermes.sessions == ["call-chan-pin"]
+    assert dtmf.calls == [("chan-pin", 8, 15.0)]
+    assert tts.spoken[0] == (
+        "Please enter your 8-digit PIN using the telephone keypad."
+    )
+    assert ext.greeting in tts.spoken
+
+
+async def test_direct_protected_extension_rejects_three_wrong_pins():
+    audio = FakeAudio(send_delay=0.001)
+    stt = FakeStt(audio=audio)
+    tts = FakeTts(frames_per_sentence=1)
+    hermes = FakeHermes()
+    # None mirrors a real DtmfCollector timeout; it must count as a failed
+    # attempt rather than raising inside compare_digest.
+    dtmf = ScriptedDtmf([None, "11111111", "22222222"])
+    ext = _ext(access_pin="24681357")
+    handler = _handler(
+        stt=stt, tts=tts, hermes=hermes, server=FakeServer(audio), dtmf=dtmf,
+    )
+
+    await asyncio.wait_for(handler.handle("chan-bad-pin", "7003", ext), timeout=2)
+
+    assert hermes.sessions == []
+    assert not stt.connected
+    assert len(dtmf.calls) == 3
+    assert "I'm sorry, I couldn't verify that PIN. Goodbye." in tts.spoken
+
+
+async def test_direct_protected_extension_fails_closed_without_dtmf_collector():
+    audio = FakeAudio(send_delay=0.001)
+    stt = FakeStt(audio=audio)
+    tts = FakeTts(frames_per_sentence=1)
+    hermes = FakeHermes()
+    ext = _ext(access_pin="24681357")
+    handler = _handler(
+        stt=stt, tts=tts, hermes=hermes, server=FakeServer(audio), dtmf=None,
+    )
+
+    await asyncio.wait_for(handler.handle("chan-no-dtmf", "7003", ext), timeout=2)
+
+    assert hermes.sessions == []
+    assert not stt.connected
+    assert "I'm sorry, I couldn't verify that PIN. Goodbye." in tts.spoken
+
+
+async def test_mary_transfers_to_atlas_only_after_correct_pin():
+    audio = FakeAudio(send_delay=0.001)
+    stt = FakeStt(audio=audio)
+    tts = FakeTts(frames_per_sentence=2)
+    mary_hermes = FakeHermes()
+    atlas_hermes = FakeHermes()
+    dtmf = ScriptedDtmf(["24681357"])
+    mary = _ext(
+        profile="phonebot", full_name="Mary Yoder", receptionist=True,
+        greeting="Mary speaking, how may I help you?",
+    )
+    atlas = _ext(
+        profile="atlas", full_name="Atlas Assistant", directory_listing=True,
+        access_pin="24681357", greeting="Atlas online. How can I help you?",
+        hermes_base_url="http://127.0.0.1:8644",
+    )
+
+    def on_sent(index, count):
+        if count != 2:
+            return
+        spoken = audio.spoken_text[-1]
+        if spoken == mary.greeting:
+            stt.emit(_final("I need Atlas."))
+            stt.emit(_utt_end())
+        elif spoken == atlas.greeting:
+            audio.hangup.set()
+
+    audio.on_sent_hook = on_sent
+    handler = _handler(
+        stt=stt,
+        tts=tts,
+        server=FakeServer(audio),
+        extensions={"7001": mary, "7003": atlas},
+        dtmf=dtmf,
+        hermes_factory=lambda ext: (
+            atlas_hermes if ext.profile == "atlas" else mary_hermes
+        ),
+    )
+
+    await asyncio.wait_for(handler.handle("chan-transfer", "7001", mary), timeout=2)
+
+    assert mary_hermes.sessions == ["call-chan-transfer"]
+    assert mary_hermes.closed
+    assert atlas_hermes.sessions == ["call-chan-transfer-7003"]
+    assert dtmf.calls == [("chan-transfer", 8, 15.0)]
+    assert "Please enter your 8-digit PIN using the telephone keypad." in tts.spoken
+    assert "Certainly. I'll transfer you to Atlas Assistant." in tts.spoken
+    assert atlas.greeting in tts.spoken
 
 
 async def _settle() -> None:

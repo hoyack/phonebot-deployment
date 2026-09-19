@@ -1,0 +1,5 @@
+; Merge this dedicated class; do not replace the default music class.
+[phonesys_hold]
+mode=files
+directory=/var/lib/asterisk/moh/phonesys_hold
+sort=alpha

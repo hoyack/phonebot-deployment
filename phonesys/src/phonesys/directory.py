@@ -11,6 +11,16 @@ TRANSFER_INTENT = re.compile(
     re.IGNORECASE,
 )
 
+# A receptionist caller will often answer with only a name ("Atlas, please")
+# instead of repeating an explicit verb such as "transfer".  Strip only
+# words that can surround that kind of directory selection; any other words
+# keep the utterance on the normal conversational path.
+BARE_SELECTION_FILLER = frozenset({
+    "a", "an", "can", "could", "d", "get", "i", "it", "its", "just",
+    "like", "me", "my", "need", "only", "please", "personal", "reach",
+    "s", "the", "to", "want", "would", "yeah", "yes", "you",
+})
+
 
 @dataclass(frozen=True)
 class DirectoryPerson:
@@ -32,6 +42,21 @@ def resolve_transfer(text: str, people: tuple[DirectoryPerson, ...]) -> Transfer
     """
     normalized = " ".join(re.findall(r"[a-z0-9]+", text.lower()))
     if not TRANSFER_INTENT.search(normalized):
+        selection_words = tuple(
+            word for word in normalized.split()
+            if word not in BARE_SELECTION_FILLER
+        )
+        if not selection_words:
+            return TransferResolution(requested=False)
+        selection = set(selection_words)
+        bare_matches = tuple(
+            person for person in people
+            if selection.issubset(
+                set(re.findall(r"[a-z0-9]+", person.full_name.lower()))
+            )
+        )
+        if bare_matches:
+            return TransferResolution(requested=True, matches=bare_matches)
         return TransferResolution(requested=False)
 
     full = tuple(

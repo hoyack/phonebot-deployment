@@ -23,6 +23,9 @@ extensions:
     profile: phonebot
     full_name: Mary Yoder
     receptionist: true
+    # Improve directory-name recognition before deterministic routing. Keep
+    # the boost low enough that unrelated speech is not rewritten as a name.
+    stt_keywords: ["Atlas:2"]
     hermes_base_url: http://127.0.0.1:8642
     hermes_api_key_env: HERMES_PHONEBOT_API_KEY
     greeting: "Mary speaking, how may I help you?"
@@ -38,7 +41,10 @@ extensions:
     # reaches the bridge container over the Docker bridge network by this
     # hostname, not localhost.
     audiosocket_host: host.docker.internal
-    audiosocket_port: 9010
+    # Windows-side persistent Ncat proxy; it resolves the current WSL address
+    # per call and forwards to the bridge's native port 9010.
+    audiosocket_port: 19010
+    audiosocket_listen_port: 9010
     max_silence_seconds: 1
     max_turn_seconds: 30
     max_call_seconds: 600
@@ -84,7 +90,10 @@ extensions:
     voice_id: pqHfZKP75CvOlQylNhV4
     barge_in_confirm_ms: 300
     audiosocket_host: host.docker.internal
-    audiosocket_port: 9010
+    # Windows-side persistent Ncat proxy; it resolves the current WSL address
+    # per call and forwards to the bridge's native port 9010.
+    audiosocket_port: 19010
+    audiosocket_listen_port: 9010
     max_silence_seconds: 1
     max_turn_seconds: 30
     max_call_seconds: 600
@@ -95,3 +104,42 @@ extensions:
       - ["Let me look into that.", "Give me a moment to check.", "Let me think that through.", "I'll take a quick look.", "One moment while I work on that."]
       - ["I'm still working on it.", "This is taking a little longer than expected.", "Bear with me for another moment."]
       - ["I should have that shortly.", "I'm nearly there.", "Just a little longer."]
+  "7003":
+    mode: streaming
+    profile: atlas
+    # Nova-2-phonecall supports keywords, not Nova-3 keyterm prompting.
+    # Low boost only; never replace a legitimate OpenCart transcript.
+    stt_keywords: ["OpenClaw:1", "Archon:2"]
+    full_name: Atlas Assistant
+    directory_listing: true
+    access_pin_env: ATLAS_PIN
+    hermes_base_url: http://127.0.0.1:8644
+    hermes_api_key_env: HERMES_ATLAS_API_KEY
+    greeting: "Atlas online. How can I help you?"
+    greeting_delay_ms: 250
+    # Public ElevenLabs voice "Atlas", added to this account on 2026-09-19.
+    voice_id: zfWx5IjUaWGWTId9hv9t
+    barge_in_confirm_ms: 300
+    audiosocket_host: host.docker.internal
+    # Windows-side persistent Ncat proxy; it resolves the current WSL address
+    # per call and forwards to the bridge's native port 9010.
+    audiosocket_port: 19010
+    audiosocket_listen_port: 9010
+    max_silence_seconds: 1
+    max_turn_seconds: 30
+    max_call_seconds: 600
+    # A phone caller should receive a result or an explicit bounded failure,
+    # not wait through an open-ended investigation. Longer work belongs in a
+    # durable background task with a verified delivery path.
+    hermes_reply_timeout_seconds: 120
+    hold_enabled: true
+    hold_offer_seconds: 15
+    hold_feedback_seconds: 15
+    hold_moh_class: phonesys_hold
+    idle_hangup_seconds: 10
+    filler_delay_ms: 800
+    filler_repeat_ms: 3000
+    filler_phrases:
+      - ["Let me work on that.", "Give me a moment.", "I'll take a look."]
+      - ["I'm still working on it.", "Bear with me for another moment."]
+      - ["I don't have the answer yet.", "I'm still checking."]

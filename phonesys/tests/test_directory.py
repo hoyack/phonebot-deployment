@@ -4,6 +4,7 @@ from phonesys.directory import DirectoryPerson, resolve_transfer
 PEOPLE = (
     DirectoryPerson("7002", "John Yoder"),
     DirectoryPerson("7003", "John Smith"),
+    DirectoryPerson("7004", "Atlas Assistant"),
 )
 
 
@@ -30,3 +31,34 @@ def test_unknown_requested_name_has_no_matches():
     result = resolve_transfer("Connect me to Alice", PEOPLE)
     assert result.requested
     assert result.matches == ()
+
+
+def test_personal_assistant_resolves_to_atlas():
+    result = resolve_transfer("Transfer me to my personal assistant", PEOPLE)
+    assert [p.full_name for p in result.matches] == ["Atlas Assistant"]
+
+
+def test_bare_name_with_politeness_resolves_to_atlas():
+    result = resolve_transfer("Yeah. Atlas, please.", PEOPLE)
+    assert result.requested
+    assert [p.full_name for p in result.matches] == ["Atlas Assistant"]
+
+
+def test_bare_name_correction_resolves_to_atlas():
+    result = resolve_transfer("It's just Atlas.", PEOPLE)
+    assert result.requested
+    assert [p.full_name for p in result.matches] == ["Atlas Assistant"]
+
+
+def test_need_name_resolves_to_atlas():
+    result = resolve_transfer("I need Atlas.", PEOPLE)
+    assert result.requested
+    assert [p.full_name for p in result.matches] == ["Atlas Assistant"]
+
+
+def test_name_in_ordinary_conversation_is_not_a_transfer():
+    assert not resolve_transfer("Atlas is a figure from mythology.", PEOPLE).requested
+
+
+def test_need_information_about_name_is_not_a_transfer():
+    assert not resolve_transfer("I need information about Atlas.", PEOPLE).requested

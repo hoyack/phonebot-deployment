@@ -7,8 +7,27 @@ reply at message.content. Auth is a bearer token (API_SERVER_KEY).
 """
 from __future__ import annotations
 
+import contextlib
 import json
+from dataclasses import dataclass
 from typing import AsyncIterator
+
+
+@dataclass(frozen=True)
+class HermesEvent:
+    """Safe public stream surface: never retain raw tool payloads."""
+    kind: str
+    text: str = ""
+
+
+def _safe_tool_text(kind: str, name: object) -> str:
+    if kind == "tool.failed":
+        return "One operation failed. I'm checking whether I can continue."
+    if kind == "tool.completed":
+        return "An operation has finished. I'm still working on your request."
+    if name in ("web_search", "web_extract", "firecrawl_search", "firecrawl_scrape"):
+        return "I'm searching for information."
+    return "I'm running an operation for your request."
 
 import httpx
 
@@ -52,13 +71,14 @@ class HermesClient:
         return ((resp.json().get("message") or {}).get("content")) or ""
 
     async def chat_stream(self, session_id: str, message: str) -> AsyncIterator[str]:
-        """Yield reply text deltas from the SSE stream.
+        """Compatibility text-only surface; reasoning is never reply text."""
+        async with contextlib.aclosing(self.chat_events(session_id, message)) as events:
+            async for event in events:
+                if event.kind == "assistant.delta":
+                    yield event.text
 
-        Only assistant.delta carries reply text. tool.progress also has a
-        'delta' field (tool_name '_thinking'), so events must be filtered by
-        NAME -- keying off the presence of 'delta' would speak the model's
-        internal reasoning down the phone.
-        """
+    async def chat_events(self, session_id: str, message: str) -> AsyncIterator[HermesEvent]:
+        """Yield assistant text and sanitized tool lifecycle metadata only."""
         async with self._client.stream(
             "POST", f"/api/sessions/{session_id}/chat/stream",
             json={"message": message},
@@ -67,18 +87,27 @@ class HermesClient:
                 raise HermesError(f"chat_stream failed: HTTP {resp.status_code}")
             event = None
             async for line in resp.aiter_lines():
-                if line.startswith("event:"):
+                if not line:
+                    event = None
+                elif line.startswith("event:"):
                     event = line.split(":", 1)[1].strip()
-                elif line.startswith("data:") and event == "assistant.delta":
+                elif line.startswith("data:"):
                     try:
                         payload = json.loads(line.split(":", 1)[1].strip())
                     except json.JSONDecodeError:
                         continue
                     if not isinstance(payload, dict):
                         continue
-                    delta = payload.get("delta")
-                    if delta:
-                        yield delta
+                    if event == "assistant.delta":
+                        delta = payload.get("delta")
+                        if isinstance(delta, str) and delta:
+                            yield HermesEvent(event, delta)
+                    elif event in ("tool.started", "tool.completed", "tool.failed"):
+                        yield HermesEvent(event, _safe_tool_text(event, payload.get("tool_name")))
+                    elif event in ("error", "run.failed", "run.cancelled"):
+                        raise HermesError("Hermes stream failed before completion")
+                    elif event == "done":
+                        yield HermesEvent("done")
 
     async def append_assistant(self, session_id: str, text: str) -> None:
         """Record what the caller actually heard after an interruption."""

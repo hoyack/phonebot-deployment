@@ -12,6 +12,7 @@ the accounting of what was heard.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from typing import AsyncIterator, Callable, Iterable
@@ -43,6 +44,8 @@ class AudioSocketSession:
         self._closed = False
         self._sending = False
         self._frame_interval = FRAME_MS / 1000.0
+        self._inbound_listeners: set[Callable[[bytes], None]] = set()
+        self._inbound_suppression = 0
 
     # No feed()/decoder here: decoding happens once per CONNECTION, in
     # AudioSocketServer._handle, because frames arrive before the UUID frame
@@ -51,8 +54,48 @@ class AudioSocketSession:
     # route untested -- see tests/test_audiosocket.py.
 
     def deliver(self, payload: bytes) -> None:
-        """Queue one decoded inbound audio payload for frames()."""
-        self._inbound.put_nowait(payload)
+        """Feed local listeners; queue only audio outside a privacy window."""
+        if self._closed:
+            return
+        for listener in tuple(self._inbound_listeners):
+            try:
+                listener(payload)
+            except Exception:
+                # Do not include exception text/tracebacks: a listener could
+                # embed raw authentication audio or digits in its exception.
+                logger.error("audiosocket inbound listener failed")
+        if not self._inbound_suppression:
+            self._inbound.put_nowait(payload)
+
+    def _discard_inbound_audio(self) -> None:
+        """Discard backlog without losing a queued EOF sentinel."""
+        eof = False
+        while not self._inbound.empty():
+            eof = self._inbound.get_nowait() is None or eof
+        if eof:
+            self._inbound.put_nowait(None)
+
+    @contextlib.contextmanager
+    def suppress_inbound_audio(self):
+        """Keep PCM local during authentication, including queued pre-roll.
+
+        Synchronous boundaries are atomic with deliver() on the event loop.
+        Local DTMF listeners continue to receive frames, but even an already
+        running STT consumer cannot receive authentication-window audio.
+        """
+        self._inbound_suppression += 1
+        self._discard_inbound_audio()
+        try:
+            yield
+        finally:
+            self._discard_inbound_audio()
+            self._inbound_suppression -= 1
+
+    def add_inbound_listener(self, listener: Callable[[bytes], None]) -> None:
+        self._inbound_listeners.add(listener)
+
+    def remove_inbound_listener(self, listener: Callable[[bytes], None]) -> None:
+        self._inbound_listeners.discard(listener)
 
     def close(self) -> None:
         self._closed = True
@@ -192,6 +235,7 @@ class AudioSocketServer:
                 for frame_type, payload in decoder.feed(data):
                     if frame_type == TYPE_UUID:
                         call_uuid = str(uuid.UUID(bytes=payload))
+                        logger.info("audiosocket session established for %s", call_uuid)
                         session = AudioSocketSession(call_uuid, writer)
                         self._sessions[call_uuid] = session
                         waiter = self._waiters.get(call_uuid)
