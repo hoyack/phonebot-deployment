@@ -32,6 +32,16 @@ against an active worker; stop that worker first during a maintenance window.
   not accepted. Auto provider selection, OAuth-only and local provider setups
   are deliberately not guessed. Credential presence is checked, **not validity**.
   Provision a working web backend separately (for example `FIRECRAWL_API_KEY`).
+- One narrowly reviewed `custom` configuration is also accepted: exact
+  `model.base_url: https://inference-api.nousresearch.com/v1` and literal
+  `model.api_key: '${NOUS_API_KEY}'`, with a nonblank key (not another braced
+  reference) in **this worker's** private `.env`. The existing
+  `model.default` (for example `openai/gpt-5.6-luna`) and `provider: custom` are
+  preserved, not relabeled. Other custom endpoints, HTTP, URL credentials,
+  query/fragment/port/trailing-slash variants, inline model keys, alternate
+  reference syntax and implicit credential fallback are refused. No provider
+  credential is copied to the bridge or the unit. This is an exact configuration
+  allowlist, not a general-purpose custom-provider validator.
 - All target directories must exist, be owned by the current user and private
   (`0700`); existing config/env/unit files must be private (`0600`). Ancestors
   cannot be group/world writable (root-owned sticky `/tmp` is allowed above
@@ -113,7 +123,23 @@ The resulting worker policy is:
   private bridge env. Existing unrelated lines/keys are preserved.
 
 **Source compatibility:** inspected Hermes revision
-`c661785f872b5647fbac7c138d965180783bd9af`. `gateway/config_loader.py` marks explicit
+`c661785f872b5647fbac7c138d965180783bd9af`. For the custom Nous configuration,
+`hermes_cli/config.py::_expand_env_vars()` expands `${NOUS_API_KEY}` after
+`load_hermes_dotenv()` loads the worker env. `runtime_provider.py::_get_model_config()`
+reads that expanded configuration; `runtime_provider_backends.py::_resolve_openrouter_runtime()`
+uses its key and endpoint while retaining `provider: custom`. The offline test
+exercises the actual resolver with dummy credentials, not an inferred alias.
+Credential pools and source-checkout environment overrides are separate runtime
+inputs: the helper does not certify their absence or provider reachability.
+
+The actual CLI writer guards existing top-level mappings before coercing JSON,
+so even `plugins: {enabled: []}` or a previous `mcp_servers: {}` would otherwise
+reject a policy reset. The helper uses `config set … --force` **only** for its
+three intentional whole-section resets: `mcp_servers`, `plugins`, `context_engine`.
+It does not force model changes or skip policy/model readback. This is tested
+against the actual writer with pre-existing sections and on a repeat preparation.
+
+`gateway/config_loader.py` marks explicit
 `enabled: false` settings with `_enabled_explicit`; `gateway/config_env.py`
 `_enable_from_env()` and `_enable_plugin_platform()` honor that marker even when
 credentials are present. The loader merges `gateway.<platform>` **after** top-level
@@ -254,8 +280,28 @@ A positive control removes explicit disables in the temporary config and proves
 Mattermost/Home Assistant/WeCom/WeCom callback/BlueBubbles really become enabled;
 restoring the prepared policy leaves **only API enabled**, with loopback host/port
 and multiplexing disabled. Socket connect/bind are blocked in that subprocess.
-Without `HERMES_TEST_SOURCE`, that integration test explicitly skips; unit-test
+A separate actual-source test calls the CLI's `set_config_value()` on a private
+fixture with existing plugin/MCP/context-engine mappings, repeats preparation,
+then runs `load_config()` and `resolve_runtime_provider(requested='custom')`.
+It verifies the braced reference resolves to the dummy worker key and preserves
+the custom provider, Nous endpoint and selected model. It deliberately avoids
+full CLI bootstrap, which could load the real checkout's `.env`; network
+connect/bind are blocked and the dotenv fallback is an absent fixture path.
+Without `HERMES_TEST_SOURCE`, both integration tests explicitly skip; unit-test
 success alone is **not** source compatibility evidence.
+
+Before live preparation, privately check **all** exact targets, not just the first
+reported error: directory/file modes, launcher, worker model/env/isolation, bridge
+env syntax and any existing unit. A `0755` user-unit directory still fails the
+helper's `0700` requirement after model compatibility is fixed. Review any mode
+change separately; do not relax guards or chmod a source profile just for a test.
+An existing bridge `.env` accepted by python-dotenv may still violate the helper's
+strict unique `NAME=value` grammar. Do not normalize unrelated assignments to
+pass this guard. A dedicated private bridge credential file is an alternative,
+but its service integration is a separate reviewed activation step. The helper
+has no read-only CLI mode: do not invoke its main command as a preflight probe.
+For offline compatibility checks, import its validation functions read-only, or
+use a private temporary HOME with dummy credentials and equivalent config/modes.
 
 No live profiles, services, ports, providers, model requests or real credentials
 are used. The actual-source test does not start adapters or the gateway, validate

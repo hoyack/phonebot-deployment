@@ -183,9 +183,16 @@ def validate_model(config, env):
         'groq': 'GROQ_API_KEY', 'xai': 'XAI_API_KEY',
     }
     required = keys.get(model['provider'])
+    if model['provider'] == 'custom':
+        # Deliberately narrow: preserve the configured provider/model and require
+        # its own worker key, never infer credentials from a model name or host.
+        if (model.get('base_url') != 'https://inference-api.nousresearch.com/v1'
+                or model.get('api_key') != '${NOUS_API_KEY}'):
+            raise SetupError("Custom worker requires the exact Nous inference endpoint and model.api_key ${NOUS_API_KEY} reference")
+        required = 'NOUS_API_KEY'
     if not required:
         raise SetupError("Unsupported model credential preflight; this helper supports explicit API-key providers only, not auto/OAuth/local fallback")
-    if not env.get(required) or env[required].startswith('${'):
+    if not env.get(required, '').strip() or env[required].strip().startswith('${'):
         raise SetupError(f"Missing {required} in explicit worker .env; provision selected model credentials privately first")
 
 
@@ -240,8 +247,12 @@ def prepare(args):
                  "HERMES_HOME": str(profile)}
     # Use Hermes' own writer; never hand-edit an existing user's configuration.
     for setting, value in POLICY.items():
+        # The reviewed writer guards existing top-level mappings before parsing
+        # JSON. Only these deliberate whole-section policy resets may replace one.
+        replace_section = ['--force'] if setting in {'mcp_servers', 'plugins', 'context_engine'} else []
         result = subprocess.run([str(args.hermes_executable), "-p", profile.name,
-                                 "config", "set", setting, value if isinstance(value, str) else json.dumps(value)],
+                                 "config", "set", setting, value if isinstance(value, str) else json.dumps(value),
+                                 *replace_section],
                                 env=child_env, cwd=profile, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, timeout=60)
         if result.returncode:

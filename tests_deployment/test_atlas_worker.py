@@ -104,10 +104,76 @@ with (pathlib.Path(os.environ['HOME']) / 'calls.jsonl').open('a') as f:
         self.assertTrue(calls)
         self.assertTrue(all(call[:4] == ['-p', 'atlas-work', 'config', 'set'] for call in calls))
         self.assertNotIn('test-model-secret', json.dumps(calls))
+        self.assertEqual({call[4] for call in calls if '--force' in call},
+                         {'mcp_servers', 'plugins', 'context_engine'})
         if shutil.which('systemd-analyze'):
             checked = subprocess.run(['systemd-analyze', '--user', 'verify', str(unit)],
                                      capture_output=True, text=True)
             self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def custom_nous_model(self) -> dict[str, object]:
+        return {'provider': 'custom', 'default': 'openai/gpt-5.6-luna',
+                'base_url': 'https://inference-api.nousresearch.com/v1',
+                'api_key': '${NOUS_API_KEY}'}
+
+    def test_custom_nous_preserves_model_and_private_provider_credential(self):
+        model = self.custom_nous_model()
+        self.private(self.config, yaml.safe_dump({'model': model}))
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(yaml.safe_load(self.config.read_text())['model'], model)
+        self.assertEqual(self.env_values(self.profile / '.env')['NOUS_API_KEY'], 'test-model-secret')
+        calls = (self.home / 'calls.jsonl').read_text()
+        unit = (self.units / 'hermes-atlas-work.service').read_text()
+        for text in (calls, unit, self.bridge.read_text(), result.stdout, result.stderr):
+            self.assertNotIn('test-model-secret', text)
+        self.assertNotIn('NOUS_API_KEY', self.env_values(self.bridge))
+
+    def test_custom_nous_unreviewed_endpoints_and_credentials_fail_without_writes(self):
+        cases = [
+            ('base_url', value) for value in (
+                None, 'https://example.invalid/v1',
+                'https://inference-api.nousresearch.com.evil.invalid/v1',
+                'http://inference-api.nousresearch.com/v1',
+                'https://user:password@inference-api.nousresearch.com/v1',
+                'https://inference-api.nousresearch.com/v1/',
+                'https://inference-api.nousresearch.com/v1?key=inline-secret',
+                'https://inference-api.nousresearch.com/v1#fragment',
+                'https://inference-api.nousresearch.com:443/v1',
+            )
+        ] + [('api_key', value) for value in (
+            None, '', 'inline-secret', '$NOUS_API_KEY', '${OPENAI_API_KEY}',
+            '${env:NOUS_API_KEY}', '${NOUS_API_KEY:-inline-secret}',
+            ' ${NOUS_API_KEY}', '${NOUS_API_KEY}suffix',
+        )]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                model = self.custom_nous_model()
+                model[field] = value
+                self.private(self.config, yaml.safe_dump({'model': model}))
+                before = [p.read_bytes() for p in (self.config, self.profile / '.env', self.bridge)]
+                result = self.run_setup()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(before, [p.read_bytes() for p in (self.config, self.profile / '.env', self.bridge)])
+                self.assertFalse((self.home / 'calls.jsonl').exists())
+                self.assertFalse(list(self.units.iterdir()))
+                self.assertNotIn('inline-secret', result.stdout + result.stderr)
+                self.assertNotIn('password', result.stdout + result.stderr)
+
+    def test_custom_nous_requires_own_literal_nonempty_key(self):
+        self.private(self.config, yaml.safe_dump({'model': self.custom_nous_model()}))
+        self.private(self.home / '.hermes/.env', 'NOUS_API_KEY=default-secret-never-copy\n')
+        for value in (None, '', '${NOUS_API_KEY}', '"   "', '" ${NOUS_API_KEY}"'):
+            with self.subTest(value=value):
+                self.private(self.profile / '.env', '' if value is None else 'NOUS_API_KEY=' + value + '\n')
+                before = self.config.read_bytes()
+                result = self.run_setup()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Missing NOUS_API_KEY', result.stderr)
+                self.assertEqual(self.config.read_bytes(), before)
+                self.assertFalse((self.home / 'calls.jsonl').exists())
+                self.assertNotIn('default-secret-never-copy', result.stdout + result.stderr)
+
     def test_invalid_inputs_are_preflighted_without_writes(self):
         original = self.config.read_bytes()
         cases = [
@@ -256,6 +322,70 @@ with (pathlib.Path(os.environ['HOME']) / 'calls.jsonl').open('a') as f:
                 result = self.run_setup()
                 self.assertNotEqual(result.returncode, 0)
                 target.unlink()
+
+    def test_actual_hermes_custom_nous_writer_and_runtime_resolver(self):
+        source = os.environ.get('HERMES_TEST_SOURCE')
+        if not source:
+            self.skipTest('Set HERMES_TEST_SOURCE for offline writer/resolver integration')
+        source = Path(source).resolve()
+        self.private(self.config, yaml.safe_dump({
+            'model': self.custom_nous_model(), 'plugins': {'enabled': []},
+            'mcp_servers': {}, 'context_engine': {'name': 'unused-test-engine'},
+        }))
+        # Use the actual CLI config writer without CLI bootstrap (which loads the
+        # real source-checkout .env). All credential/env fixtures remain synthetic.
+        self.executable.write_text(f'''#!{sys.executable}
+import os, pathlib, socket, sys
+sys.path.insert(0, {str(source)!r})
+def deny_network(*a, **kw):
+    raise AssertionError('offline test attempted network')
+socket.socket.connect = deny_network
+socket.socket.bind = deny_network
+assert sys.argv[1:5] == ['-p', 'atlas-work', 'config', 'set']
+from hermes_cli.env_loader import load_hermes_dotenv
+load_hermes_dotenv(hermes_home=pathlib.Path(os.environ['HERMES_HOME']),
+                  project_env=pathlib.Path(os.environ['HOME']) / 'absent-project.env',
+                  load_external_secrets=False)
+from hermes_cli.config import set_config_value
+assert sys.argv[7:] == (['--force'] if sys.argv[5] in ('mcp_servers', 'plugins', 'context_engine') else [])
+set_config_value(sys.argv[5], sys.argv[6], force='--force' in sys.argv[7:])
+''')
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(yaml.safe_load(self.config.read_text())['model'], self.custom_nous_model())
+        key = self.env_values(self.profile / '.env')['API_SERVER_KEY']
+        repeated = self.run_setup()
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(self.env_values(self.profile / '.env')['API_SERVER_KEY'], key)
+        probe = r'''
+import logging, os, pathlib, socket, sys
+sys.path.insert(0, sys.argv[1])
+def deny_network(*a, **kw):
+    raise AssertionError('offline test attempted network')
+socket.socket.connect = deny_network
+socket.socket.bind = deny_network
+logging.disable(logging.CRITICAL)
+from hermes_cli.env_loader import load_hermes_dotenv
+home = pathlib.Path(os.environ['HERMES_HOME'])
+load_hermes_dotenv(hermes_home=home, project_env=home / 'absent.env', load_external_secrets=False)
+from hermes_cli.config import load_config
+from hermes_cli.runtime_provider import resolve_runtime_provider
+config = load_config()
+assert config['model']['api_key'] == 'test-model-secret'
+assert config['model']['default'] == 'openai/gpt-5.6-luna'
+runtime = resolve_runtime_provider(requested='custom')
+assert runtime['provider'] == 'custom'
+assert runtime['base_url'] == 'https://inference-api.nousresearch.com/v1'
+assert runtime['api_key'] == 'test-model-secret'
+print('actual writer and custom Nous env-reference resolver passed')
+'''
+        checked = subprocess.run([sys.executable, '-c', probe, str(source)],
+            env={'HOME': str(self.home), 'HERMES_HOME': str(self.profile),
+                 'PATH': '/usr/bin:/bin', 'HERMES_SAFE_MODE': '1',
+                 'HERMES_MANAGED_DIR': str(self.units)},
+            cwd=self.home, capture_output=True, text=True, timeout=60)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertIn('custom Nous env-reference resolver passed', checked.stdout)
 
     def test_actual_hermes_loaders_block_inherited_and_source_dotenv_platforms(self):
         source = os.environ.get('HERMES_TEST_SOURCE')
