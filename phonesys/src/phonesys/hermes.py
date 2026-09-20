@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
+
+from phonesys.native_work import WorkCall, WorkError
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -42,7 +45,11 @@ class HermesClient:
     # is sitting on an open line hearing nothing while we wait. A live call
     # proved the cost: one /chat never answered, httpx raised ReadTimeout 64s
     # later, and the caller heard 64s of silence before the call died.
-    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0,
+                 *, native_work=None) -> None:
+        self._work_settings = native_work
+        self._work_key = getattr(native_work, "api_key", "") or api_key
+        self._work = None
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._client = httpx.AsyncClient(
@@ -56,10 +63,23 @@ class HermesClient:
         if system_prompt:
             body["system_prompt"] = system_prompt
         resp = await self._client.post("/api/sessions", json=body)
-        if resp.status_code == 409:
-            return session_id  # already exists; reuse it
-        if resp.status_code >= 400:
+        if resp.status_code >= 400 and resp.status_code != 409:
             raise HermesError(f"create_session failed: HTTP {resp.status_code}")
+        # This is called only after successful PIN in the streaming bridge. Native
+        # work follows the CALL lifetime, never a chat stream/foreground turn.
+        if self._work_settings and self._work is None:
+            settings = self._work_settings
+            work = WorkCall(session_id, settings.base_url, self._work_key,
+                            settings.directory, settings.worker_config)
+            try:
+                await work.start()
+            except (WorkError, OSError):
+                await work.runs.client.aclose()
+                logging.getLogger(__name__).warning("Native phone work unavailable (policy or transport)")
+            else:
+                self._work = work
+        if resp.status_code == 409:
+            return session_id
         return (resp.json().get("session") or {}).get("id") or session_id
 
     async def chat(self, session_id: str, message: str) -> str:
@@ -119,5 +139,13 @@ class HermesClient:
         if resp.status_code >= 400:
             raise HermesError(f"append_assistant failed: HTTP {resp.status_code}")
 
+    def work_statuses(self) -> dict[str, str]:
+        """Status-only snapshot for local audio notices; never polls the API."""
+        return self._work.statuses() if self._work else {}
+
     async def aclose(self) -> None:
-        await self._client.aclose()
+        try:
+            if self._work:
+                await self._work.close()
+        finally:
+            await self._client.aclose()

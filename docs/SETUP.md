@@ -1,8 +1,11 @@
 # Fresh Linux / WSL setup
 
 This is a **fresh-install** procedure, not an updater for an existing phone system.
-Nothing in the helpers starts/stops services, installs packages, runs Hermes,
-changes Docker or touches the default profile. Do not run an older `install.sh`.
+The base `scripts/setup.py` helper does not start/stop services, install packages,
+run Hermes, change Docker or touch the default profile. The separate optional
+[standalone Atlas worker helper](ATLAS-WORKER-SETUP.md) does invoke the Hermes
+config CLI for its explicitly selected worker, but never activates services.
+Do not run an older `install.sh`.
 The new compatibility entry point requires an explicit `generate` or `stage`
 subcommand. Back up an existing system and use a separately reviewed migration;
 there is intentionally no `--force` or overwrite option.
@@ -260,6 +263,18 @@ done
 This is real inference, not part of the offline helper suite. Check permissions
 on each credential store after setup; `.env`/auth files should be 0600 and private
 profile directories 0700. Do not display their contents in support reports.
+
+### Optional: independent Atlas research
+
+The three-profile bootstrap does not enable native work or create its worker.
+Read [native work behavior and security](NATIVE-WORK.md), then follow the separate
+[standalone worker setup](ATLAS-WORKER-SETUP.md). Keep the foreground gateways
+standalone: creating `atlas-work` does not expose `/p/atlas-work` on Atlas's API.
+Use a separate literal-loopback gateway with its own worker bearer key, explicit
+bridge `api_key_env`, restricted worker policy, and the foreground Atlas skill.
+Do not forward the Atlas token to a different origin. Actual-source compatibility
+checks and separately authorized runtime validation are prerequisites to activation;
+offline tests and publication alone do not establish live acceptance.
 
 ## 8. Media permissions and manual systemd activation
 

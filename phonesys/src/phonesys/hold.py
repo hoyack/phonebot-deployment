@@ -22,6 +22,7 @@ OFFER = ('This is taking a little longer. Would you like hold music while I work
          'Say yes or no. While music is playing, say Atlas, take me off hold, '
          'or stop music at any time; say status for an update or cancel to stop working.')
 STATUS = "I'm still working on your request. I don't have a complete answer yet."
+DEFERRED_FEEDBACK_SECONDS = 3.0
 
 
 def control_intent(text: str, *, offered: bool) -> str | None:
@@ -85,6 +86,10 @@ async def run_hold_reply(*, audio, ext, hermes, session_id, utterance, ari,
     # explicit status remain intact, as does the first ordinary-turn ack.
     ack_due = (now() + ext.filler_delay_ms / 1000
                if ext.filler_delay_ms > 0 and not suppress_ack else float('inf'))
+    # Suppression removes only the immediate duplicate, not all feedback up
+    # to the hold offer. This is pending-work status, not a completion claim.
+    deferred_due = (now() + DEFERRED_FEEDBACK_SECONDS
+                    if ext.filler_delay_ms > 0 else float('inf'))
     interrupt = interrupt if interrupt is not None else asyncio.Event()
     final_seen = final_seen if final_seen is not None else asyncio.Event()
     interrupted_at = None
@@ -206,8 +211,11 @@ async def run_hold_reply(*, audio, ext, hermes, session_id, utterance, ari,
         await stop_music()
         sent = 0
         def on_sent(_):
-            nonlocal sent
+            nonlocal sent, ack_due, deferred_due
             sent += 1
+            # An answer or local control already reassured the caller. Never
+            # follow it with a stale acknowledgement/deferred duplicate.
+            ack_due = deferred_due = float('inf')
             if answer:
                 tracker.record_sent(len(spoken) - 1)
             kind = 'reply' if answer else 'feedback'
@@ -271,6 +279,8 @@ async def run_hold_reply(*, audio, ext, hermes, session_id, utterance, ari,
                 # survives the floor claim would fire the instant it clears,
                 # as if the caller's interruption had never happened.
                 ack_due = float('inf')
+                if deferred_due != float('inf'):
+                    deferred_due = now() + DEFERRED_FEEDBACK_SECONDS
             text = read_utterance()
             if interrupt.is_set() and not text:
                 # Acoustic stopping and semantic replacement are separate.
@@ -402,6 +412,11 @@ async def run_hold_reply(*, audio, ext, hermes, session_id, utterance, ari,
                 ack_due = float('inf')
                 if first_frames['reply'] is None and not holding:
                     await speech("I'm working on your request.")
+            # The consent offer/periodic update wins if both timers are due.
+            if deferred_due <= now() < feedback:
+                deferred_due = now() + DEFERRED_FEEDBACK_SECONDS
+                if first_frames['reply'] is None and not holding:
+                    await speech(progress)
             if now() >= feedback:
                 if not offered:
                     diagnostic('hold.offer', 'requested')
@@ -425,7 +440,7 @@ async def run_hold_reply(*, audio, ext, hermes, session_id, utterance, ari,
                     holding = False
                     await speech("Hold music is unavailable. I'll keep working and give spoken updates.")
             await asyncio.wait({nxt, gone}, timeout=max(0, min(
-                0.05, feedback - now(), ack_due - now(), cutoff - now())),
+                0.05, feedback - now(), ack_due - now(), deferred_due - now(), cutoff - now())),
                 return_when=asyncio.FIRST_COMPLETED)
         if not ended.is_set() and now() < deadline:
             await close_run()
