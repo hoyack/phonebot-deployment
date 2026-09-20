@@ -733,6 +733,9 @@ class StreamingCallHandler:
             delivery_notes: list[str] = []
             background_next = loop.time() + BACKGROUND_FEEDBACK_SECONDS
             background_count = 0
+            # Best-effort notices are attempted once, not delivery receipts.
+            # Retrying failed native notices indefinitely would reintroduce an
+            # unbounded idle exemption. Presence warning delivery is separate.
             background_notified: set[str] = set()
             background_uncertain: set[str] = set()
 

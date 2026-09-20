@@ -56,8 +56,13 @@ retained 600-second cap. Presence checking can independently remain enabled.
   are bridge evidence, not proof of carrier audibility.
 - Native work excuses listening silence only inside its **original 120-second
   work budget**. An expired nonterminal/unknown observation is not completion or
-  successful cancellation. Atlas reports that the work limit passed and that it
-  cannot confirm whether work stopped; normal presence checking resumes.
+  successful cancellation. Atlas attempts one best-effort notice that the work
+  limit passed and that it cannot confirm whether work stopped; normal presence
+  checking resumes. As with existing result-ready notices, an interrupted or
+  failed native notice is not retried indefinitely and is not proof of delivery.
+  It never substitutes for the separately delivery-gated presence warning before
+  an idle hangup. This prevents permanent notice failure from granting an
+  infinite idle exemption while preserving the job's reconciliation authority.
   Late terminal confirmation can still produce a separate result-ready notice.
   Native IDs, idempotency keys, reservation files and cooperative stop/close
   reconciliation are retained. The native eight-turn maximum is unchanged.
@@ -96,7 +101,11 @@ for file in scripts/*.sh freepbx/*.sh; do bash -n "$file"; done
 git diff --check
 ```
 
-Repeat the locked environment/full suites with Python 3.14. CI additionally
+Repeat the locked environment/full suites with Python 3.14. For both interpreters,
+set `HERMES_TEST_SOURCE=/absolute/path/to/reviewed/hermes-agent` on the
+`tests_deployment` command to exercise the optional actual Hermes writer/resolver
+integration (otherwise those two tests explicitly skip). It uses isolated
+synthetic profiles, not the live profile. CI additionally
 checks PowerShell parsing and pinned Gitleaks history scanning. Lifecycle tests
 use scaled durations and injected local audio/STT/Hermes adapters, plus an
 isolated loopback native-control fake; they do not dial or contact providers.

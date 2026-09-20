@@ -109,6 +109,31 @@ async def test_late_terminal_after_unknown_expiry_gets_result_notice(monkeypatch
         await until(lambda: any('ready for review' in s for s in audio.spoken_text))
 
 
+async def test_failed_uncertainty_notice_still_requires_delivered_presence_warning(monkeypatch, tmp_path):
+    class BrokenUncertainty(FakeTts):
+        def __init__(self):
+            super().__init__(frames_per_sentence=1)
+            self.attempts = 0
+        async def synthesize_frames(self, text, voice_id, sentence_index):
+            if "can't confirm" in text:
+                self.attempts += 1
+                raise RuntimeError('uncertainty notice unavailable')
+            return await super().synthesize_frames(text, voice_id, sentence_index)
+    tts = BrokenUncertainty()
+    async with call(monkeypatch, tmp_path, tts=tts, call_limit_enabled=False,
+                    idle_hangup_seconds=.05, idle_presence_grace_seconds=.12) as (audio, stt, hermes, status):
+        await status('a', 'running')
+        hermes._work.jobs['a']['deadline'] = time.time() - 1
+        await until(lambda: tts.attempts == 1)
+        assert not hermes.closed
+        await until(lambda: any('Are you still there?' in s for s in audio.spoken_text))
+        await asyncio.sleep(.05)
+        assert not hermes.closed
+        await until(lambda: hermes.closed)
+        assert tts.attempts == 1 and 'a' in hermes._work.jobs
+        assert not any("can't confirm" in s for s in audio.spoken_text)
+
+
 @pytest.mark.parametrize('exit_kind', ['work_timeout', 'eof'])
 async def test_consented_hold_not_idle_but_work_and_eof_still_bound_it(monkeypatch, tmp_path, exit_kind):
     class HeldWork(StalledHermes):
