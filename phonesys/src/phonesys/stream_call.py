@@ -218,11 +218,12 @@ async def _wait_any(events: Sequence[asyncio.Event], timeout: float) -> None:
     """
     waiters = [asyncio.create_task(ev.wait()) for ev in events]
     try:
-        await asyncio.wait(waiters, timeout=timeout,
+        await asyncio.wait(waiters, timeout=None if timeout == float('inf') else timeout,
                            return_when=asyncio.FIRST_COMPLETED)
     finally:
         for waiter in waiters:
             waiter.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
 
 
 async def _quietly(what: str, coro) -> None:
@@ -608,7 +609,8 @@ class StreamingCallHandler:
                 outcome = 'stt_eof'
                 try:
                     async for ev in stt.events():
-                        if ext.native_work and ev.kind in ('speech_started', 'transcript'):
+                        if ((ext.native_work or ext.idle_presence_grace_seconds)
+                                and ev.kind in ('speech_started', 'transcript')):
                             # Proactive audio yields even before interim confirmation.
                             # This does not alter the foreground barge/floor policy.
                             background_interrupt.set()
@@ -710,7 +712,11 @@ class StreamingCallHandler:
                                       if (not self._extensions or ext.receptionist)
                                       else None))
 
-            deadline = loop.time() + ext.max_call_seconds
+            limited_deadline = loop.time() + ext.max_call_seconds
+            # Infinity is a comparison-only no-limit sentinel. All timers
+            # passed to asyncio are finite or None; work budgets stay finite.
+            deadline = (limited_deadline
+                        if ext.call_limit_enabled else float('inf'))
             # Idle hangup. The clock measures CALLER SILENCE WHILE LISTENING,
             # so it is (re)started here, once the greeting has finished
             # playing, and again after every reply returns below. It therefore
@@ -723,19 +729,27 @@ class StreamingCallHandler:
             # extension that has not opted in gets.
             idle_seconds = ext.idle_hangup_seconds
             idle_since = loop.time()
+            presence_at = None
             delivery_notes: list[str] = []
             background_next = loop.time() + BACKGROUND_FEEDBACK_SECONDS
             background_count = 0
             background_notified: set[str] = set()
+            background_uncertain: set[str] = set()
 
             def background_pending():
                 if not ext.native_work:
                     return False
+                waiting = hermes.work_waiting_keys()
                 from phonesys.native_work import TERMINAL
-                return any(state not in TERMINAL or key not in background_notified
+                return any(key in waiting or key not in (
+                           background_notified if state in TERMINAL else background_uncertain)
                            for key, state in hermes.work_statuses().items())
 
             while True:
+                if presence_at is not None and last_voice_at >= presence_at:
+                    presence_at = None
+                idle_budget = (ext.idle_presence_grace_seconds
+                               if presence_at is not None else idle_seconds)
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     logger.info("call %s hit max_call_seconds", channel_id)
@@ -760,7 +774,7 @@ class StreamingCallHandler:
                     # a deadline the check refuses to act on and spins.
                     wait_for = min(wait_for, max(
                         0.0,
-                        idle_seconds
+                        idle_budget
                         - (loop.time() - max(idle_since, last_voice_at)),
                     ))
                 if utterance_parts and not utterance_ready.is_set():
@@ -847,11 +861,14 @@ class StreamingCallHandler:
                                             await stt.connect()
                                             tasks[1] = asyncio.create_task(pump_stt())
                                     ext = target
+                                    deadline = (limited_deadline
+                                                if ext.call_limit_enabled else float('inf'))
                                     hermes = self._hermes_factory(ext)
                                     session_id = f"call-{channel_id}-{person.extension}"
                                     await hermes.create_session(session_id)
                                     await self._speak(audio, ext, [ext.greeting])
                                     idle_seconds = ext.idle_hangup_seconds
+                                    presence_at = None
                                     idle_since = loop.time()
                                     continue
                                 if len(resolution.matches) > 1:
@@ -897,6 +914,7 @@ class StreamingCallHandler:
                                           trigger=("stalled" if stalled
                                                    else "utterance_ready"))
                         reply_active = False
+                        presence_at = None
                         # Restart the idle clock the moment the bridge is
                         # listening again. Anchoring it to when the caller last
                         # SPOKE instead would charge the agent's own reply --
@@ -914,18 +932,25 @@ class StreamingCallHandler:
                         and loop.time() >= background_next):
                     from phonesys.native_work import TERMINAL
                     statuses = hermes.work_statuses()
+                    waiting = hermes.work_waiting_keys()
                     ready = {key: state for key, state in statuses.items()
                              if state in TERMINAL and key not in background_notified}
+                    uncertain = {key for key, state in statuses.items()
+                                 if state not in TERMINAL and key not in waiting
+                                 and key not in background_uncertain}
                     notice = ''
-                    if ready:
+                    if ready or uncertain:
                         parts = []
                         if 'completed' in ready.values():
                             parts.append('Background results are ready for review.')
                         if any(state != 'completed' for state in ready.values()):
                             parts.append('Some background work did not complete.')
+                        if uncertain:
+                            parts.append("The background work time limit has passed. I can't confirm whether it stopped.")
                         notice = ' '.join(parts) + ' Ask me when you want to review it.'
                         background_notified.update(ready)
-                    elif ('running' in statuses.values()
+                        background_uncertain.update(uncertain)
+                    elif (any(statuses[key] == 'running' for key in waiting)
                           and background_count < BACKGROUND_PROGRESS_LIMIT):
                         notice = BACKGROUND_PROGRESS
                         background_count += 1
@@ -936,10 +961,27 @@ class StreamingCallHandler:
                             audio, ext, notice, interrupt=background_interrupt,
                             ended=ended, deadline=deadline,
                             allowed=lambda: background_clear() and (
-                                bool(ready) or 'running' in hermes.work_statuses().values()))
+                                bool(ready or uncertain) or any(
+                                    hermes.work_statuses().get(key) == 'running'
+                                    for key in hermes.work_waiting_keys())))
                         idle_since = loop.time()
-                if idle_seconds and not utterance_parts and not background_pending() and \
-                        loop.time() - max(idle_since, last_voice_at) >= idle_seconds:
+                if idle_seconds and not utterance_parts and not caller_has_floor() and not background_pending() and \
+                        loop.time() - max(idle_since, last_voice_at) >= idle_budget:
+                    if ext.idle_presence_grace_seconds and presence_at is None:
+                        background_interrupt.clear()
+                        voice_before = last_voice_at
+                        delivered = await self._background_notice(
+                            audio, ext,
+                            "Are you still there? If I don't hear from you, I'll end the call.",
+                            interrupt=background_interrupt, ended=ended, deadline=deadline,
+                            allowed=lambda: not ended.is_set() and not utterance_parts
+                            and not caller_has_floor() and last_voice_at == voice_before)
+                        idle_since = loop.time()
+                        # Never count failed synthesis or interrupted speech as
+                        # a delivered warning. Retry after a fresh idle interval.
+                        if delivered and last_voice_at == voice_before:
+                            presence_at = idle_since
+                        continue
                     # Nothing from the caller since the agent stopped talking.
                     # `last_voice_at` as well as `idle_since` because a caller
                     # who goes quiet for nine seconds and then starts talking
@@ -1031,7 +1073,7 @@ class StreamingCallHandler:
             logger.exception("teardown of call %s failed", channel_id)
 
     async def _background_notice(self, audio, ext, text, *, interrupt, ended,
-                                 deadline, allowed) -> None:
+                                 deadline, allowed) -> bool:
         """Local status audio only: no agent turn, history edit, or job control.
 
         One bounded attempt. A caller who interrupts a notice is not forced to
@@ -1046,12 +1088,20 @@ class StreamingCallHandler:
         try:
             done, _ = await asyncio.wait({stop, synthesis}, return_when=asyncio.FIRST_COMPLETED)
             if stop in done or interrupt.is_set() or not allowed():
-                return
+                return False
             frames = synthesis.result()
-            sender = asyncio.create_task(audio.send_frames(frames, on_sent=_discard_frame))
+            if not frames:
+                return False
+            sent = 0
+            def on_sent(_):
+                nonlocal sent
+                sent += 1
+            sender = asyncio.create_task(audio.send_frames(frames, on_sent=on_sent))
             await asyncio.wait({stop, sender}, return_when=asyncio.FIRST_COMPLETED)
             if sender.done():
                 sender.result()
+                return (sent == len(frames) and not interrupt.is_set()
+                        and not ended.is_set() and allowed())
         except Exception:
             # Optional status audio cannot tear down a working call.
             logger.warning('Background notice unavailable; returning to listening')
@@ -1062,6 +1112,8 @@ class StreamingCallHandler:
             if sender is not None:
                 audio.stop_sending()
                 await _drain_sender(sender)
+
+        return False
 
     async def _speak(self, audio: AudioSocketSession, ext: ExtensionConfig,
                      sentences: list[str], *, cached: Frames | None = None) -> None:
@@ -1387,7 +1439,8 @@ class StreamingCallHandler:
                 # check in handle()'s loop, and a runaway agent can speak for
                 # as long as it likes.
                 done, _ = await asyncio.wait(
-                    {sender, waiter}, timeout=max(0.0, deadline - loop.time()),
+                    {sender, waiter}, timeout=(None if deadline == float('inf')
+                                              else max(0.0, deadline - loop.time())),
                     return_when=asyncio.FIRST_COMPLETED
                 )
             except BaseException:

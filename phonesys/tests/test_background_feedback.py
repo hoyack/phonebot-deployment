@@ -16,6 +16,7 @@ from test_stream_call import FakeAudio, FakeStt, FakeTts, FakeServer, FakeHermes
 
 class WorkHermes(FakeHermes):
     work_statuses = HermesClient.work_statuses
+    work_waiting_keys = HermesClient.work_waiting_keys
 
     def __init__(self, work):
         super().__init__(['Dispatched.'])
@@ -197,6 +198,7 @@ async def test_hold_and_foreground_barge_leave_separate_subjects_alive(monkeypat
     from test_stream_stalls import StalledHermes
     class HeldWork(StalledHermes):
         work_statuses = HermesClient.work_statuses
+        work_waiting_keys = HermesClient.work_waiting_keys
         def __init__(self, work):
             super().__init__()
             self._work = work

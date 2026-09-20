@@ -58,6 +58,10 @@ class ExtensionConfig:
     # 0 by the loader (see _idle_hangup_seconds), so nothing downstream has to
     # defend against a clock deadline that has already passed.
     idle_hangup_seconds: float = 0.0
+    # Explicit opt-out, not max_call_seconds=0. Only streaming Atlas may
+    # disable the total limit, with a finite presence-check safety net.
+    call_limit_enabled: bool = True
+    idle_presence_grace_seconds: float = 0.0
     full_name: str = ""
     receptionist: bool = False
     directory_listing: bool = False
@@ -77,6 +81,18 @@ class ExtensionConfig:
     native_work: NativeWorkConfig | None = None
 
     def __post_init__(self) -> None:
+        if type(self.call_limit_enabled) is not bool:
+            raise ValueError("call_limit_enabled must be a YAML boolean")
+        if (not math.isfinite(self.idle_presence_grace_seconds)
+                or self.idle_presence_grace_seconds < 0):
+            raise ValueError("idle_presence_grace_seconds must be finite and nonnegative")
+        if not self.call_limit_enabled and (
+                self.profile != "atlas" or self.mode != "streaming"
+                or not self.hold_enabled
+                or not math.isfinite(self.idle_hangup_seconds)
+                or self.idle_hangup_seconds <= 0
+                or self.idle_presence_grace_seconds <= 0):
+            raise ValueError("Disabling call_limit_enabled requires streaming Atlas with hold_enabled and finite positive idle/presence timers")
         if self.native_work:
             work = self.native_work
             source, target = urlsplit(self.hermes_base_url), urlsplit(work.base_url)
@@ -166,6 +182,8 @@ def load_config(path: Path) -> Config:
             max_silence_seconds=int(ext.get("max_silence_seconds", 2)),
             max_turn_seconds=int(ext.get("max_turn_seconds", 30)),
             max_call_seconds=int(ext.get("max_call_seconds", 600)),
+            call_limit_enabled=ext.get("call_limit_enabled", True),
+            idle_presence_grace_seconds=float(ext.get("idle_presence_grace_seconds", 0)),
             hermes_reply_timeout_seconds=float(
                 ext.get("hermes_reply_timeout_seconds", 30.0)
             ),
