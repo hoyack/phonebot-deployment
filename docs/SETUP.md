@@ -1,5 +1,12 @@
 # Fresh Linux / WSL setup
 
+For a shorter prerequisite-first entry point, see
+[FreePBX/Telnyx deployment](free-pbx-deploy.md). `scripts/deploy.py` wraps the
+existing helpers with default dry-runs, optional digest-pinned PBX preparation,
+and credential validation before explicitly acknowledged staging. The detailed
+procedure below remains available; do not run both generation paths for the
+same output/media directories.
+
 This is a **fresh-install** procedure, not an updater for an existing phone system.
 The base `scripts/setup.py` helper does not start/stop services, install packages,
 run Hermes, change Docker or touch the default profile. The separate optional
