@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 from dotenv import load_dotenv
@@ -12,6 +13,14 @@ from dotenv import load_dotenv
 
 class MissingSecretError(RuntimeError):
     """A required environment variable was absent or empty."""
+
+
+@dataclass(frozen=True)
+class NativeWorkConfig:
+    base_url: str
+    directory: Path
+    worker_config: Path
+    api_key: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -65,8 +74,27 @@ class ExtensionConfig:
     hold_moh_class: str = "phonesys_hold"
     # Nova-2 hints, not transcript substitutions. Opt-in per extension.
     stt_keywords: tuple[str, ...] = ()
+    native_work: NativeWorkConfig | None = None
 
     def __post_init__(self) -> None:
+        if self.native_work:
+            work = self.native_work
+            source, target = urlsplit(self.hermes_base_url), urlsplit(work.base_url)
+            worker_name = work.worker_config.parent.name
+            same_origin = (source.scheme, source.netloc) == (target.scheme, target.netloc)
+            routed = same_origin and target.path.rstrip("/") == "/p/" + worker_name
+            dedicated = (not same_origin and bool(work.api_key)
+                         and target.hostname in {"127.0.0.1", "::1"}
+                         and target.port is not None and not target.path.rstrip("/"))
+            if (self.profile != "atlas" or self.mode != "streaming" or not self.access_pin
+                    or not (routed or dedicated)
+                    or target.scheme not in {"http", "https"} or target.username or target.password
+                    or target.query or target.fragment
+                    or worker_name in {"atlas", "mary", "default"}
+
+                    or not work.directory.is_absolute() or not work.worker_config.is_absolute()
+                    or work.worker_config.name != "config.yaml"):
+                raise ValueError("native_work requires PIN-protected streaming Atlas and a routed worker or separately keyed loopback gateway")
         for name in ("hold_offer_seconds", "hold_feedback_seconds"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -146,6 +174,13 @@ def load_config(path: Path) -> Config:
             hold_feedback_seconds=float(ext.get("hold_feedback_seconds", 15.0)),
             hold_moh_class=str(ext.get("hold_moh_class", "phonesys_hold")),
             stt_keywords=tuple(ext.get("stt_keywords") or ()),
+            native_work=(NativeWorkConfig(
+                base_url=ext["native_work"]["base_url"],
+                directory=Path(ext["native_work"]["directory"]),
+                worker_config=Path(ext["native_work"]["worker_config"]),
+                api_key=(_require_env(ext["native_work"]["api_key_env"])
+                         if ext["native_work"].get("api_key_env") else ""),
+            ) if ext.get("native_work") else None),
             mode=ext.get("mode", "turn"),
             barge_in_confirm_ms=int(ext.get("barge_in_confirm_ms", 300)),
             audiosocket_host=ext.get("audiosocket_host", "host.docker.internal"),

@@ -35,6 +35,15 @@ The default Archon/Slack profile is **not** a telephone route. Profile histories
 
 Helper entry points document supported options with `--help`. Installation prepares files but does not silently start Docker, open firewall rules, place calls, or replace an existing system.
 
+## Optional Atlas native work
+
+[Native work and caller feedback](docs/NATIVE-WORK.md) describes opt-in independent
+read-only research, explicit result retrieval, cooperative cancellation and bounded
+proactive notices. Follow [standalone worker setup](docs/ATLAS-WORKER-SETUP.md) for
+a separate loopback gateway and worker bearer key; standalone Atlas does not expose
+`/p/atlas-work`. The shipped bridge configuration does not enable this feature.
+Source publication and offline checks are not live deployment or call acceptance.
+
 ## Repository contents
 
 - `phonesys/` — current bridge source/configuration and isolated offline tests.
@@ -59,7 +68,7 @@ You need Docker/Compose, Linux user systemd (WSL2 for the documented Windows top
 
 ## Runtime synchronization and compatibility
 
-The established runtime lives at `/home/hoyack/work/phonesys`, while its deployment snapshot lives at `/home/hoyack/work/phonesys-deployment`. Those are reference host paths, **not installation requirements**. This publication includes the live bridge's Python source, tests, environment-variable example, and configuration as an allowlisted snapshot; runtime secrets and media are excluded.
+The established runtime lives at `/home/hoyack/work/phonesys`, while its deployment snapshot lives at `/home/hoyack/work/phonesys-deployment`. Those are reference host paths, **not installation requirements**. The base publication captured an allowlisted runtime snapshot; this branch adds reviewed native-work source and setup helpers that require separate deployment. Do not assume source/runtime byte equality from publication. Runtime secrets and media are excluded.
 
 Fresh installation may render path/credential-specific settings rather than copying machine-specific paths verbatim. The running installation is not modified by publication. Do not overwrite runtime dirty changes from a Git checkout: compare, review, preserve rollback copies, test, then perform a no-active-calls bridge-only restart if a runtime update is actually needed.
 

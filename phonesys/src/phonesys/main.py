@@ -89,6 +89,11 @@ def _first_streaming_extension(cfg):
     return None
 
 
+def _streaming_hermes(ext):
+    return HermesClient(base_url=ext.hermes_base_url, api_key=ext.hermes_api_key,
+                        native_work=ext.native_work)
+
+
 async def _start_streaming(cfg, ari: AriClient,
                            dtmf: DtmfCollector | None = None) -> StreamingCallHandler | None:
     """Build the streaming (barge-in) path, or None if it is unavailable.
@@ -157,9 +162,7 @@ async def _start_streaming(cfg, ari: AriClient,
         ari=ari,
         stt_factory=lambda: LiveStt(api_key=os.environ["DEEPGRAM_API_KEY"]),
         tts=stream_tts,
-        hermes_factory=lambda ext: HermesClient(
-            base_url=ext.hermes_base_url, api_key=ext.hermes_api_key
-        ),
+        hermes_factory=_streaming_hermes,
         audiosocket_server=as_server,
         ari_app=cfg.ari.app,
         filler_bank=filler_bank,
