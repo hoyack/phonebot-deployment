@@ -161,6 +161,9 @@ def stage(args):
         safe_path(target)
         if target.exists() or target.is_symlink():
             raise ValueError(f'refusing existing target: {target}')
+    if getattr(args, 'dry_run', False):
+        print('DRY RUN: all fresh staging destinations preflighted; nothing copied or started.')
+        return
     for source, target in targets:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if source.is_dir():

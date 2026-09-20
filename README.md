@@ -2,7 +2,14 @@
 
 Private deployment source for a Docker FreePBX/Asterisk PBX, a Python ARI/AudioSocket voice bridge, three isolated Hermes phone profiles, and the Windows→WSL AudioSocket relay.
 
-**New installation: start at [docs/SETUP.md](docs/SETUP.md)** and follow the linked [Windows/PBX guide](docs/WINDOWS-PBX.md). These are fresh-host procedures, not an in-place updater for an existing phone system.
+**Easy deployment: start at [docs/free-pbx-deploy.md](docs/free-pbx-deploy.md)**
+for the default-dry-run `scripts/deploy.py` helper, container FreePBX preparation,
+Telnyx trunk setup, and receptionist plus two protected profiles. Prerequisites
+for PSTN activation are an existing Hermes install, deployed FreePBX and a
+functional SIP trunk. The helper prepares files; activation stays explicit.
+The detailed [setup guide](docs/SETUP.md) and [Windows/PBX guide](docs/WINDOWS-PBX.md)
+remain authoritative for model authentication, networking and activation.
+These are fresh-host procedures, not an in-place updater for an existing system.
 
 ## What runs where
 
