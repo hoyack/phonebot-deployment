@@ -188,7 +188,15 @@ local 9010; native Linux must select its actual container-to-host path instead.
 
 Atlas's consent hold references `phonesys_hold`. Install a licensed local MOH
 asset and class as the PBX guide describes, or explicitly disable `hold_enabled`
-until it exists. Do not replace the PBX default MOH class.
+until it exists. If disabling that controller, also set `call_limit_enabled: true`;
+the unlimited-call opt-in requires the bounded duplex controller. Do not replace
+the PBX default MOH class.
+
+Atlas alone defaults to no total conversation cutoff, with a presence question
+after 30 seconds of listening silence and a further 20-second response grace.
+Other extensions retain their limits. Read [call lifecycle settings, compatibility,
+offline tests and narrow deployment/rollback](atlas-call-lifecycle.md) before
+changing an existing installation; work budgets remain separate and unchanged.
 
 ```bash
 python3 "$REPO/scripts/setup.py" validate --bundle "$BUNDLE"

@@ -143,6 +143,10 @@ class HermesClient:
         """Status-only snapshot for local audio notices; never polls the API."""
         return self._work.statuses() if self._work else {}
 
+    def work_waiting_keys(self) -> set[str]:
+        """No I/O: bounded work wait, separate from terminal confirmation."""
+        return self._work.waiting_keys() if self._work else set()
+
     async def aclose(self) -> None:
         try:
             if self._work:

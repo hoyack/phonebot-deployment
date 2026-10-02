@@ -262,6 +262,16 @@ class WorkCall:
         return statuses
 
     # Absolute control-operation bounds, not a change to the 120-second work budget.
+    def waiting_keys(self) -> set[str]:
+        """Jobs whose original work budget still excuses caller silence.
+
+        Expiry is NOT termination evidence. Keep jobs, reservations, native
+        IDs and watchdog/close reconciliation untouched, including unknowns.
+        """
+        statuses = self.statuses()
+        return {key for key, job in self.jobs.items()
+                if statuses[key] not in TERMINAL and time.time() < job['deadline']}
+
     _CONTROL_TIMEOUT = 10
 
     async def observe(self, job, *, cancel=False):

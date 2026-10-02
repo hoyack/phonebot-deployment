@@ -136,7 +136,10 @@ extensions:
     hold_offer_seconds: 15
     hold_feedback_seconds: 15
     hold_moh_class: phonesys_hold
-    idle_hangup_seconds: 10
+    # Conversation has no total cutoff; independent work budgets stay bounded.
+    call_limit_enabled: false
+    idle_hangup_seconds: 30
+    idle_presence_grace_seconds: 20
     filler_delay_ms: 800
     filler_repeat_ms: 3000
     filler_phrases:

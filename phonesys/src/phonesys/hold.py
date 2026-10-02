@@ -222,19 +222,27 @@ async def run_hold_reply(*, audio, ext, hermes, session_id, utterance, ari,
             if first_frames[kind] is None:
                 first_frames[kind] = clock()
         sending = answer and answer_frames is not None
+        # A disabled call cap must not turn a stalled media operation into an
+        # infinite wait. Bound synthesis independently; playback gets its own
+        # actual frame duration plus drain slack, never the generation budget.
+        operation_deadline = (now() + (len(answer_frames or ()) * .02 + 10.0
+                              if sending else ext.hermes_reply_timeout_seconds)
+                              if not ext.call_limit_enabled else deadline)
         work = asyncio.create_task(
             audio.send_frames(answer_frames, on_sent=on_sent) if sending else
             tts.synthesize_frames(text, ext.voice_id, 0))
         try:
             while True:
                 await asyncio.wait({work, gone, interrupted}, timeout=max(0, min(
-                    0.05, deadline - now())),
+                    0.05, deadline - now(), operation_deadline - now())),
                     return_when=asyncio.FIRST_COMPLETED)
                 if work.done() and sending:
                     work.result()
                     return True
                 if ended.is_set() or now() >= deadline or interrupt.is_set() or read_utterance():
                     return False
+                if now() >= operation_deadline and not work.done():
+                    raise TtsStreamError("Speech operation time limit reached")
                 if not sending and caller_has_floor():
                     return False
                 if work.done():
@@ -244,6 +252,8 @@ async def run_hold_reply(*, audio, ext, hermes, session_id, utterance, ari,
                         tracker.expect(len(spoken), len(result))
                         spoken.append(text)
                     work = asyncio.create_task(audio.send_frames(result, on_sent=on_sent))
+                    if not ext.call_limit_enabled:
+                        operation_deadline = now() + len(result) * .02 + 10.0
                     sending = True
         finally:
             async def finish_speech():
