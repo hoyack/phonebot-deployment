@@ -131,11 +131,7 @@ def generate(args):
         f'{quoted(repo / "phonesys/.venv/bin/python", True)} {quoted(repo / "scripts/run-bridge.py", True)} --runtime {quoted(runtime, True)}',
         runtime / 'bridge.env'))
     config = (repo / 'phonesys/config.yaml').read_text()
-    # Deliberate fresh-install divergence: John must not reuse Mary's key.
-    before, john = config.split('  "7002":', 1)
-    john, after = john.split('  "7003":', 1)
-    john = john.replace('hermes_api_key_env: HERMES_PHONEBOT_API_KEY', 'hermes_api_key_env: HERMES_JYODER_API_KEY')
-    write(out / 'config.yaml', before + '  "7002":' + john + '  "7003":' + after)
+    write(out / 'config.yaml', config)
     write(out / 'manifest.json', json.dumps({'home': str(home), 'repo': str(repo), 'hermes_bin': str(args.hermes_bin)}, indent=2) + '\n')
     print('Generated private bundle; nothing installed or started.')
 

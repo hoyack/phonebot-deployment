@@ -22,15 +22,16 @@ there is intentionally no `--force` or overwrite option.
 Use a dedicated Linux Unix user on Debian/Ubuntu or a WSL2 distro with systemd.
 Store the checkout, virtualenv, generated secrets and profiles on Linux storage
 (e.g. `/home/you`), not `/mnt/c`; Windows filesystem permissions are not an
-adequate substitute for 0600 credential files. Use a private checkout you can
-access with your own GitHub credentials. Run commands as the intended service
-user, not root. Use sudo only for OS prerequisites or the explicit linger choice.
+adequate substitute for 0600 credential files. Keep generated credentials and
+runtime state private even though the source repository is public. Run commands
+as the intended service user, not root. Use sudo only for OS prerequisites or
+the explicit linger choice.
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y git curl ca-certificates xz-utils python3 python3-venv ffmpeg
 # Python >=3.11 required; uv can download a supported interpreter below.
-git clone <YOUR_PRIVATE_REPOSITORY_URL> "$HOME/phonebot-deployment"
+git clone https://github.com/hoyack/phonebot-deployment.git "$HOME/phonebot-deployment"
 cd "$HOME/phonebot-deployment"
 REPO=$(pwd -P)
 ```
@@ -145,9 +146,9 @@ This creates only the bundle, with 0700 directories and 0600 files:
 * `bridge.env`: random 256-bit ARI password, three independent 256-bit API keys,
   and independently generated eight-digit John/Atlas PINs. Deepgram and
   ElevenLabs keys are deliberately blank. Secrets are never printed by helper.
-* `config.yaml`: fresh runtime copy of bridge configuration. **7002 changes from
-  the source snapshot's shared `HERMES_PHONEBOT_API_KEY` to its own
-  `HERMES_JYODER_API_KEY`.** The versioned source snapshot remains unchanged.
+* `config.yaml`: fresh runtime copy of bridge configuration. All three profiles
+  use independent `HERMES_*_API_KEY` variables, including
+  `HERMES_JYODER_API_KEY` on 7002.
 * `units/`: four user services with resolved absolute paths. Each Hermes unit
   sets `API_SERVER_ENABLED=true`, `API_SERVER_HOST=127.0.0.1`, its assigned
   `API_SERVER_PORT`, and its own `HERMES_HOME`/credential file. These API env names

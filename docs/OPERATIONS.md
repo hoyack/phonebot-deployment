@@ -15,10 +15,9 @@ separate operational domains; restarting Hermes cannot repair SIP/RTP routing.
 
 Profiles live under `~/.hermes/profiles/NAME`. Each owns its model login, API
 key, state and capabilities. Do not copy the default profile or enable a second
-multiplexed owner. Fresh John's key is `HERMES_JYODER_API_KEY`; the checked-in
-bridge snapshot historically shares Mary's key, but the generated runtime
-configuration deliberately separates it. Edit the installed runtime config,
-not the snapshot, for installation-specific routing.
+multiplexed owner. John's key is `HERMES_JYODER_API_KEY`; the checked-in and
+generated configurations keep all three profile keys independent. Edit the
+installed runtime config, not the snapshot, for installation-specific routing.
 
 The bridge service invokes `scripts/run-bridge.py --runtime ~/.config/phonesys`
 with its own virtualenv, private `bridge.env`, and a media symlink into the

@@ -250,6 +250,7 @@ def test_shipped_config_gives_7001_an_idle_hangup_and_7000_none(monkeypatch):
     # Every configured protected profile needs test-only credentials; do not
     # depend on a developer's live .env to exercise the shipped YAML.
     monkeypatch.setenv("JOHN_YODER_PIN", "123456")
+    monkeypatch.setenv("HERMES_JYODER_API_KEY", "john-test-key")
     monkeypatch.setenv("HERMES_ATLAS_API_KEY", "atlas-test-key")
     monkeypatch.setenv("ATLAS_PIN", "24681357")
     cfg = load_config(Path(__file__).resolve().parents[1] / "config.yaml")
@@ -262,6 +263,7 @@ def test_shipped_atlas_extension_is_private_and_directory_listed(monkeypatch):
     monkeypatch.setenv("ARI_PASSWORD", "secret")
     monkeypatch.setenv("HERMES_PHONEBOT_API_KEY", "phone-key")
     monkeypatch.setenv("JOHN_YODER_PIN", "123456")
+    monkeypatch.setenv("HERMES_JYODER_API_KEY", "john-test-key")
     monkeypatch.setenv("HERMES_ATLAS_API_KEY", "atlas-key")
     monkeypatch.setenv("ATLAS_PIN", "24681357")
 

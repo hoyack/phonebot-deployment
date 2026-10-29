@@ -39,16 +39,21 @@ python3 -m venv .venv
 cp .env.example .env    # then fill in
 ```
 
-`.env` must define:
+For a full three-profile deployment, use the repository root README and its
+private bundle generator rather than copying this example manually. A manual
+phonebot-only development `.env` must define:
 
 ```
-ARI_BASE_URL, ARI_USER, ARI_PASSWORD
+ARI_USER, ARI_PASSWORD
 DEEPGRAM_API_KEY
 ELEVENLABS_API_KEY
 HERMES_PHONEBOT_API_KEY     # matches API_SERVER_KEY in the phonebot profile
 ```
 
-Startup fails immediately and names any variable that is missing.
+The shipped four-route `config.yaml` additionally requires
+`HERMES_JYODER_API_KEY`, `HERMES_ATLAS_API_KEY`, `JOHN_YODER_PIN`, and
+`ATLAS_PIN`. ARI URL/app are YAML settings, not environment overrides. Startup
+fails immediately and names any variable that is missing.
 
 ### Hermes profile
 

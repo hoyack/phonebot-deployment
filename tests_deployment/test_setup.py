@@ -182,3 +182,18 @@ def test_systemd_accepts_rendered_units_with_spaces(tmp_path):
     result = subprocess.run(['systemd-analyze', 'verify', *map(str, (out / 'units').glob('*.service'))], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     assert 'EnvironmentFile= path is not absolute' not in result.stderr
+
+
+def test_tracked_config_and_env_example_keep_profile_credentials_independent():
+    config = (ROOT / 'phonesys/config.yaml').read_text()
+    assert config.count('hermes_api_key_env: HERMES_PHONEBOT_API_KEY') == 2
+    assert config.count('hermes_api_key_env: HERMES_JYODER_API_KEY') == 1
+    assert config.count('hermes_api_key_env: HERMES_ATLAS_API_KEY') == 1
+
+    example = env_file(ROOT / 'phonesys/.env.example')
+    required = {'ARI_USER', 'ARI_PASSWORD', 'DEEPGRAM_API_KEY', 'ELEVENLABS_API_KEY',
+                'HERMES_PHONEBOT_API_KEY', 'HERMES_JYODER_API_KEY',
+                'HERMES_ATLAS_API_KEY', 'JOHN_YODER_PIN', 'ATLAS_PIN'}
+    assert required <= example.keys()
+    assert 'ARI_BASE_URL' not in example
+    assert 'ARI_APP' not in example

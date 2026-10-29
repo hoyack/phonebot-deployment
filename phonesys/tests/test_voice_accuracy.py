@@ -76,7 +76,8 @@ def test_shipped_vocabulary_supports_receptionist_directory_and_atlas(tmp_path, 
     from pathlib import Path
     from phonesys.config import load_config
     for name in ('ARI_USER', 'ARI_PASSWORD', 'HERMES_PHONEBOT_API_KEY',
-                 'HERMES_ATLAS_API_KEY', 'ATLAS_PIN', 'JOHN_YODER_PIN'):
+                 'HERMES_JYODER_API_KEY', 'HERMES_ATLAS_API_KEY',
+                 'ATLAS_PIN', 'JOHN_YODER_PIN'):
         monkeypatch.setenv(name, 'test-secret')
     # Isolate from the live .env file.
     path = tmp_path / 'config.yaml'

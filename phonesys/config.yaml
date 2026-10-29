@@ -41,7 +41,7 @@ extensions:
     # reaches the bridge container over the Docker bridge network by this
     # hostname, not localhost.
     audiosocket_host: host.docker.internal
-    # Windows-side persistent Ncat proxy; it resolves the current WSL address
+    # Windows-side PowerShell relay; it resolves the current WSL address
     # per call and forwards to the bridge's native port 9010.
     audiosocket_port: 19010
     audiosocket_listen_port: 9010
@@ -84,13 +84,13 @@ extensions:
     directory_listing: true
     access_pin_env: JOHN_YODER_PIN
     hermes_base_url: http://127.0.0.1:8643
-    hermes_api_key_env: HERMES_PHONEBOT_API_KEY
+    hermes_api_key_env: HERMES_JYODER_API_KEY
     greeting: "John Yoder speaking, how can I help you today?"
     greeting_delay_ms: 250
     voice_id: pqHfZKP75CvOlQylNhV4
     barge_in_confirm_ms: 300
     audiosocket_host: host.docker.internal
-    # Windows-side persistent Ncat proxy; it resolves the current WSL address
+    # Windows-side PowerShell relay; it resolves the current WSL address
     # per call and forwards to the bridge's native port 9010.
     audiosocket_port: 19010
     audiosocket_listen_port: 9010
@@ -121,7 +121,7 @@ extensions:
     voice_id: zfWx5IjUaWGWTId9hv9t
     barge_in_confirm_ms: 300
     audiosocket_host: host.docker.internal
-    # Windows-side persistent Ncat proxy; it resolves the current WSL address
+    # Windows-side PowerShell relay; it resolves the current WSL address
     # per call and forwards to the bridge's native port 9010.
     audiosocket_port: 19010
     audiosocket_listen_port: 9010

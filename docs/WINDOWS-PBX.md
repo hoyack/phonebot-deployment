@@ -55,10 +55,10 @@ Both client and server must answer. Do not install a second Docker daemon inside
 WSL for this topology. Select Docker Desktop start-at-sign-in if desired; this
 is still a user-session deployment, not pre-login server availability.
 
-Continue with [SETUP.md sections 1–3](SETUP.md) for the private checkout,
-Hermes and bridge dependencies, then return here for PBX provisioning. Use your
-own GitHub SSH/credential-manager login with access to
-`https://github.com/hoyack/phonebot-deployment`; never embed a token in a clone URL.
+Continue with [SETUP.md sections 1–3](SETUP.md) for the source checkout,
+Hermes and bridge dependencies, then return here for PBX provisioning. Clone
+`https://github.com/hoyack/phonebot-deployment.git`; never embed credentials in
+a clone URL.
 
 ## 1. Scope, prerequisites and topology
 

@@ -3,11 +3,44 @@
 ## Scope
 
 The publication synchronizes the active bridge's reviewed Python source/tests,
-configuration and dependency metadata into this private deployment repository,
+configuration and dependency metadata into this deployment repository,
 then adds fresh-install helpers and documentation. It does **not** export a
 working user's secrets, profiles, histories, recordings, database volumes or
 licensed music. The running installation was not restarted or modified during
 this publication work; original dirty worktrees were preserved.
+
+## 2026-10-29 public-release audit
+
+The public deployment entry point now documents Docker/PBX provisioning, Hermes
+installation, independent xAI/Grok authentication, extension/trunk wiring and
+the complete required credential set. The tracked 7002 route and environment
+example now use `HERMES_JYODER_API_KEY`; no generator-only key rewrite remains.
+
+Executed against this release working tree:
+
+- Bridge suite: **501 passed, 1 deselected in 37.72s**.
+- Deployment helpers: **59 passed, 2 skipped, 64 subtests passed in 25.74s**;
+  FreePBX helpers: **7 tests, OK**. Shell syntax and `git diff --check` passed.
+- Actual `deploy.py profiles` dry-run/apply, credential validation, staging,
+  real bridge configuration `--check`, and systemd unit verification passed in
+  an isolated temporary home with dummy provider credentials and no calls.
+- Actual `deploy.py pbx` dry-run/apply produced a Compose project pinned to the
+  reviewed FreePBX/MariaDB digests. Compose rendering, installer dry-run and
+  shell syntax passed without starting that temporary project.
+- Gitleaks 8.30.1 scanned current files and all **11 commits** with no findings.
+- Local Markdown links/code fences passed. Remote `main` commit `0c1d118`'s
+  GitHub Actions offline workflow was successful before these local changes.
+- The existing local PBX had zero active channels before an explicitly requested
+  image update/recreate. FreePBX remained at digest
+  `sha256:34e65b7a0a02ad9da67315c12bcfd0368a89c3f6d185abf498ae8a48687f0daa`;
+  MariaDB updated to digest
+  `sha256:d769e37960821dfdcf096954f6e7ac89f747e116c1bba98e48edd265dfc7deae`.
+  Database health, Asterisk 21.10.2, GUI response, ARI `phonesys` registration,
+  all four custom routes and RTP 10000–10099 were verified afterward.
+- The existing runtime's no-call Hermes session create/close live test passed:
+  **1 passed, 501 deselected**. It used the real local Mary gateway and no model
+  inference. John/Atlas gateways were not running locally; no acoustic internal
+  call, fresh-host installation, or PSTN/Telnyx call is claimed by this audit.
 
 ## Known source/runtime difference: PIN audio privacy
 
