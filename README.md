@@ -19,35 +19,70 @@ The default routes are:
 
 ```mermaid
 flowchart LR
-    Caller["SIP phone or Telnyx DID"] <-- "SIP + RTP" --> PBX
+    Softphone["SIP softphone<br/>ordinary extension 1001"]
+    Telnyx["Telnyx DID + SIP trunk<br/>optional PSTN access"]
 
-    subgraph Docker["Docker Compose"]
-        PBX["FreePBX 17 + Asterisk 21"]
-        DB[("MariaDB 10.11")]
-        PBX <--> DB
+    subgraph Docker["Docker Compose — telephony"]
+        PBX["FreePBX 17 + Asterisk 21<br/>SIP :5060/udp<br/>RTP :10000-10099/udp"]
+        Dialplan["extensions_custom.conf<br/>Stasis phonesys<br/>7000 / 7001 / 7002 / 7003"]
+        DB[("MariaDB 10.11<br/>FreePBX config + CDR")]
+        PBX --> Dialplan
+        PBX <-- "private Docker network" --> DB
     end
 
-    subgraph Host["Linux or WSL host"]
-        Bridge["phonesys bridge<br/>Python user service"]
-        Relay["Windows AudioSocket relay<br/>WSL deployments only"]
-        Gateways["Hermes API gateways<br/>phonebot :8642<br/>jyoder :8643<br/>atlas :8644"]
+    subgraph Host["Linux or WSL — phonesys user service"]
+        Bridge["phonesys bridge<br/>ARI events + call state"]
+        Turn["Turn-based pipeline<br/>record → transcribe → reply → play"]
+        Stream["Streaming pipeline<br/>duplex audio + barge-in + transfers"]
+        Listener["AudioSocket listener<br/>TCP :9010"]
+        Relay["Windows PowerShell relay<br/>WSL only · TCP :19010"]
+        Media["Shared media<br/>sounds + caller recordings"]
+        Bridge --> Turn
+        Bridge --> Stream
+        Stream <-- "8 kHz duplex PCM" --> Listener
+        Turn <-- "TTS sounds + recordings" --> Media
     end
 
+    subgraph Hermes["Linux or WSL — isolated Hermes gateways"]
+        Phonebot["phonebot / Mary<br/>127.0.0.1:8642"]
+        John["jyoder / John<br/>127.0.0.1:8643"]
+        Atlas["atlas<br/>127.0.0.1:8644"]
+    end
+
+    Grok["xAI Grok<br/>or another configured LLM"]
+    STT["Deepgram<br/>speech-to-text + VAD"]
+    TTS["ElevenLabs<br/>text-to-speech"]
+
+    Softphone <-- "SIP + RTP" --> PBX
+    Telnyx <-- "SIP + RTP<br/>exact DID route → 7001" --> PBX
     PBX <-- "ARI REST + WebSocket<br/>loopback :8088" --> Bridge
-    PBX <-- "AudioSocket PCM" --> Relay
-    Relay <-- "TCP :19010 to :9010" --> Bridge
-    Bridge <-- "HTTPS transcription" --> STT["Deepgram STT"]
-    Bridge <-- "Authenticated /chat/stream" --> Gateways
-    Gateways <-- "xAI Responses API" --> Grok["Grok or another configured LLM"]
-    Bridge <-- "HTTPS speech synthesis" --> TTS["ElevenLabs TTS"]
+    PBX <-- "read sounds / write recordings<br/>Docker bind mounts" --> Media
+    PBX <-- "AudioSocket PCM<br/>host.docker.internal:19010" --> Relay
+    Relay <-- "TCP forward :19010 → :9010" --> Listener
+    PBX -. "native Linux: direct AudioSocket" .-> Listener
+
+    Turn <-- "7000 · authenticated /chat" --> Phonebot
+    Stream <-- "7001 · authenticated /chat/stream" --> Phonebot
+    Stream <-- "7002 · PIN + /chat/stream" --> John
+    Stream <-- "7003 · PIN + /chat/stream" --> Atlas
+
+    Turn <-- "recorded audio / transcript" --> STT
+    Stream <-- "live audio / transcript + VAD" --> STT
+    Turn <-- "reply text / speech audio" --> TTS
+    Stream <-- "sentence text / streamed audio" --> TTS
+    Phonebot <-- "xAI Responses API" --> Grok
+    John <-- "xAI Responses API" --> Grok
+    Atlas <-- "xAI Responses API" --> Grok
 ```
 
-ARI controls calls; RTP carries phone audio; AudioSocket carries streaming PCM
-between Asterisk and the bridge. The bridge maps each extension to one Hermes
-base URL and one bearer-token environment variable. Each Hermes profile owns its
-model login, API server key, sessions, and tools. On native Linux, Asterisk
-connects directly to the bridge's container-reachable AudioSocket address; the
-Windows relay is not needed.
+ARI controls calls; RTP carries phone audio. Extension 7000 exchanges recordings
+and synthesized sound files through shared media, while 7001–7003 use
+AudioSocket for streaming PCM. The bridge maps each extension to one Hermes base
+URL and bearer-token environment variable; each profile's `API_SERVER_KEY`
+matches its corresponding bridge `HERMES_*_API_KEY`. Each Hermes profile owns
+its model login, sessions, and tools. On native Linux, Asterisk connects directly
+to the bridge's container-reachable AudioSocket address; the Windows relay is
+not needed.
 
 ## Prerequisites
 
